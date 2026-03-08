@@ -771,7 +771,7 @@ export default function Page() {
   }, [activeScenarioId, buildScenarioFromCurrent]);
 
   // We intentionally hydrate from autosave once on mount.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (typeof window === "undefined") {
       setAutosaveReady(true);
@@ -807,6 +807,7 @@ export default function Page() {
       setAutosaveReady(true);
     }
   }, []);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   useEffect(() => {
     if (!autosaveReady || typeof window === "undefined" || scenarios.length === 0) {
