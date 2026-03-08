@@ -837,33 +837,34 @@ export default function Page() {
     if (!layoutDrag) {
       return;
     }
+    const drag = layoutDrag;
     function handleMouseMove(event: MouseEvent) {
-      if (layoutDrag.mode === "pan") {
-        const deltaX = event.clientX - layoutDrag.pointerOffsetX;
-        const deltaY = event.clientY - layoutDrag.pointerOffsetY;
+      if (drag.mode === "pan") {
+        const deltaX = event.clientX - drag.pointerOffsetX;
+        const deltaY = event.clientY - drag.pointerOffsetY;
         setLayoutView((prev) => ({
           ...prev,
-          offsetX: (layoutDrag.initialOffsetX ?? prev.offsetX) + deltaX,
-          offsetY: (layoutDrag.initialOffsetY ?? prev.offsetY) + deltaY,
+          offsetX: (drag.initialOffsetX ?? prev.offsetX) + deltaX,
+          offsetY: (drag.initialOffsetY ?? prev.offsetY) + deltaY,
         }));
         return;
       }
 
       const point = getCanvasPercentPoint(event.clientX, event.clientY, {
-        scale: layoutDrag.viewScale,
-        offsetX: layoutDrag.viewOffsetX,
-        offsetY: layoutDrag.viewOffsetY,
+        scale: drag.viewScale,
+        offsetX: drag.viewOffsetX,
+        offsetY: drag.viewOffsetY,
       });
-      if (!point || !layoutDrag.benchId) {
+      if (!point || !drag.benchId) {
         return;
       }
       setBenches((prev) =>
         prev.map((bench, index) => {
-          if (bench.id !== layoutDrag.benchId) {
+          if (bench.id !== drag.benchId) {
             return bench;
           }
           const baseLayout = bench.layout ?? defaultLayoutForIndex(index);
-          if (layoutDrag.mode === "resize") {
+          if (drag.mode === "resize") {
             const minW = 2;
             const minH = 1.5;
             const w = clamp(point.x - baseLayout.x, minW, 100 - baseLayout.x);
@@ -875,8 +876,8 @@ export default function Page() {
             };
           }
 
-          const x = clamp(point.x - layoutDrag.pointerOffsetX, 0, 100 - baseLayout.w);
-          const y = clamp(point.y - layoutDrag.pointerOffsetY, 0, 100 - baseLayout.h);
+          const x = clamp(point.x - drag.pointerOffsetX, 0, 100 - baseLayout.w);
+          const y = clamp(point.y - drag.pointerOffsetY, 0, 100 - baseLayout.h);
           return {
             ...bench,
             floorId: selectedFloorId,
