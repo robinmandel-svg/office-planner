@@ -5,11 +5,13 @@ import {
   type ChangeEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import Image from "next/image";
 import {
   DAYS,
   type Bench,
@@ -625,8 +627,8 @@ export default function Page() {
     return `S${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   }
 
-  function buildScenarioFromCurrent(id: string, name: string): PlannerScenario {
-    return {
+  const buildScenarioFromCurrent = useCallback(
+    (id: string, name: string): PlannerScenario => ({
       id,
       name,
       benches: cloneBenches(benches),
@@ -639,8 +641,20 @@ export default function Page() {
       flexOverrides: { ...flexOverrides },
       benchStabilityWeight: Number(benchStabilityWeight),
       proximityRequests: cloneProximity(proximityRequests),
-    };
-  }
+    }),
+    [
+      benches,
+      benchStabilityWeight,
+      flexDefault,
+      flexOverrides,
+      floors,
+      preallocations,
+      proximityRequests,
+      selectedFloorId,
+      solverMode,
+      teams,
+    ],
+  );
 
   function applyScenario(scenario: PlannerScenario): void {
     setBenches(cloneBenches(scenario.benches));
@@ -664,22 +678,25 @@ export default function Page() {
     setError(null);
   }
 
-  function getCanvasPercentPoint(
-    clientX: number,
-    clientY: number,
-    view: { scale: number; offsetX: number; offsetY: number } = layoutView,
-  ) {
-    const canvas = layoutCanvasRef.current;
-    if (!canvas) {
-      return null;
-    }
-    const rect = canvas.getBoundingClientRect();
-    const localX = (clientX - rect.left - view.offsetX) / view.scale;
-    const localY = (clientY - rect.top - view.offsetY) / view.scale;
-    const x = (localX / rect.width) * 100;
-    const y = (localY / rect.height) * 100;
-    return { x, y, rect };
-  }
+  const getCanvasPercentPoint = useCallback(
+    (
+      clientX: number,
+      clientY: number,
+      view: { scale: number; offsetX: number; offsetY: number } = layoutView,
+    ) => {
+      const canvas = layoutCanvasRef.current;
+      if (!canvas) {
+        return null;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const localX = (clientX - rect.left - view.offsetX) / view.scale;
+      const localY = (clientY - rect.top - view.offsetY) / view.scale;
+      const x = (localX / rect.width) * 100;
+      const y = (localY / rect.height) * 100;
+      return { x, y, rect };
+    },
+    [layoutView],
+  );
 
   useEffect(() => {
     if (!result) {
@@ -751,20 +768,10 @@ export default function Page() {
         scenario.id === activeScenarioId ? buildScenarioFromCurrent(scenario.id, scenario.name) : scenario,
       ),
     );
-  }, [
-    activeScenarioId,
-    benches,
-    benchStabilityWeight,
-    flexDefault,
-    flexOverrides,
-    floors,
-    preallocations,
-    proximityRequests,
-    selectedFloorId,
-    solverMode,
-    teams,
-  ]);
+  }, [activeScenarioId, buildScenarioFromCurrent]);
 
+  // We intentionally hydrate from autosave once on mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (typeof window === "undefined") {
       setAutosaveReady(true);
@@ -897,7 +904,7 @@ export default function Page() {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [layoutDrag, selectedFloorId]);
+  }, [getCanvasPercentPoint, layoutDrag, selectedFloorId]);
 
   const allocationMatrix = useMemo(() => {
     if (!manualAllocations.length && !result) {
@@ -2343,7 +2350,14 @@ export default function Page() {
             }}
           >
             {selectedFloor?.imageDataUrl ? (
-              <img src={selectedFloor.imageDataUrl} alt={`${selectedFloor.name} layout`} className="layout-image" />
+              <Image
+                src={selectedFloor.imageDataUrl}
+                alt={`${selectedFloor.name} layout`}
+                className="layout-image"
+                fill
+                sizes="100vw"
+                unoptimized
+              />
             ) : (
               <div className="layout-placeholder">No floor image yet. Upload one to start bench positioning.</div>
             )}
