@@ -1,0 +1,4 @@
+bench_id,day,seats,label
+B1,Mon,2,HR
+B1,Tue,1,Assistant
+B2,Wed;Thu;Fri,1,Handicap

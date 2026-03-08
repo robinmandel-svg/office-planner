@@ -1,0 +1,4 @@
+id,size,target_days,preferred_days,contiguous_days_required
+Engineering,12,3,Tue;Wed;Thu,false
+Sales,8,3,Tue;Thu,false
+Finance,5,2,Mon;Fri,true
