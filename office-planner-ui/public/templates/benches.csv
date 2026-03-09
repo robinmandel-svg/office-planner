@@ -1,4 +1,4 @@
-id,capacity,order,floor_id,x,y,w,h
-B1,10,1,F1,10,20,8,5
-B2,10,2,F1,22,20,8,5
-B3,8,3,F1,34,20,8,5
+id,capacity,order,floor_id,x,y,w,h,rotation
+B1,10,1,F1,10,20,8,5,0
+B2,10,2,F1,22,20,8,5,0
+B3,8,3,F1,34,20,8,5,0

@@ -13,6 +13,7 @@ export type Bench = {
     y: number;
     w: number;
     h: number;
+    rotation?: number;
   };
 };
 

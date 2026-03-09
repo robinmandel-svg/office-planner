@@ -21,9 +21,12 @@ function validateInput(raw: PlannerInput): string[] {
       errors.push(`Bench ${bench.id} capacity must be >= 0.`);
     }
     if (bench.layout) {
-      const { x, y, w, h } = bench.layout;
+      const { x, y, w, h, rotation } = bench.layout;
       if ([x, y, w, h].some((value) => Number.isNaN(value))) {
         errors.push(`Bench ${bench.id} layout values must be numbers.`);
+      }
+      if (rotation !== undefined && Number.isNaN(rotation)) {
+        errors.push(`Bench ${bench.id} layout rotation must be a number.`);
       }
       if (w <= 0 || h <= 0) {
         errors.push(`Bench ${bench.id} layout width/height must be > 0.`);

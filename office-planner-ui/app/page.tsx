@@ -46,7 +46,7 @@ type LayoutFile = {
   benches: Array<{
     id: string;
     floorId?: string;
-    layout?: { x: number; y: number; w: number; h: number };
+    layout?: { x: number; y: number; w: number; h: number; rotation?: number };
   }>;
 };
 
@@ -109,12 +109,16 @@ type AutosaveFile = {
 };
 
 type DragState = {
-  mode: "move" | "resize" | "pan";
+  mode: "move" | "resize" | "rotate" | "pan";
   benchId?: string;
   pointerOffsetX: number;
   pointerOffsetY: number;
   initialOffsetX?: number;
   initialOffsetY?: number;
+  initialRotation?: number;
+  rotateCenterClientX?: number;
+  rotateCenterClientY?: number;
+  rotatePointerStartAngle?: number;
   viewScale: number;
   viewOffsetX: number;
   viewOffsetY: number;
@@ -235,7 +239,19 @@ function clamp(value: number, min: number, max: number): number {
 function defaultLayoutForIndex(index: number) {
   const col = index % 4;
   const row = Math.floor(index / 4);
-  return { x: 8 + col * 20, y: 18 + row * 14, w: 8, h: 5 };
+  return { x: 8 + col * 20, y: 18 + row * 14, w: 8, h: 5, rotation: 0 };
+}
+
+function normalizeRotation(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const wrapped = ((((value + 180) % 360) + 360) % 360) - 180;
+  return Math.round(wrapped);
+}
+
+function angleFromCenter(clientX: number, clientY: number, centerX: number, centerY: number): number {
+  return (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
 }
 
 function toDayArray(value: unknown): Day[] {
@@ -254,7 +270,13 @@ function cloneBenches(source: Bench[]): Bench[] {
     order: Number(bench.order),
     floorId: bench.floorId,
     layout: bench.layout
-      ? { x: Number(bench.layout.x), y: Number(bench.layout.y), w: Number(bench.layout.w), h: Number(bench.layout.h) }
+      ? {
+          x: Number(bench.layout.x),
+          y: Number(bench.layout.y),
+          w: Number(bench.layout.w),
+          h: Number(bench.layout.h),
+          rotation: normalizeRotation(Number(bench.layout.rotation ?? 0)),
+        }
       : undefined,
   }));
 }
@@ -602,6 +624,10 @@ export default function Page() {
       ),
     [benchesByOrder, selectedFloor],
   );
+  const selectedBenchOnFloor = useMemo(
+    () => benchesOnSelectedFloor.find((bench) => bench.id === selectedBenchId) ?? null,
+    [benchesOnSelectedFloor, selectedBenchId],
+  );
   const teamOptions = useMemo(
     () =>
       teams
@@ -858,6 +884,41 @@ export default function Page() {
         return;
       }
 
+      if (
+        drag.mode === "rotate" &&
+        drag.benchId &&
+        drag.rotateCenterClientX !== undefined &&
+        drag.rotateCenterClientY !== undefined &&
+        drag.rotatePointerStartAngle !== undefined
+      ) {
+        const pointerAngle = angleFromCenter(
+          event.clientX,
+          event.clientY,
+          drag.rotateCenterClientX,
+          drag.rotateCenterClientY,
+        );
+        const rawDelta = pointerAngle - drag.rotatePointerStartAngle;
+        const delta = ((((rawDelta + 180) % 360) + 360) % 360) - 180;
+        const freeRotation = normalizeRotation((drag.initialRotation ?? 0) + delta);
+        const nextRotation = event.shiftKey
+          ? normalizeRotation(Math.round(freeRotation / 15) * 15)
+          : freeRotation;
+        setBenches((prev) =>
+          prev.map((bench, index) => {
+            if (bench.id !== drag.benchId) {
+              return bench;
+            }
+            const baseLayout = bench.layout ?? defaultLayoutForIndex(index);
+            return {
+              ...bench,
+              floorId: selectedFloorId,
+              layout: { ...baseLayout, rotation: nextRotation },
+            };
+          }),
+        );
+        return;
+      }
+
       const point = getCanvasPercentPoint(event.clientX, event.clientY, {
         scale: drag.viewScale,
         offsetX: drag.viewOffsetX,
@@ -883,7 +944,6 @@ export default function Page() {
               layout: { ...baseLayout, w, h },
             };
           }
-
           const x = clamp(point.x - drag.pointerOffsetX, 0, 100 - baseLayout.w);
           const y = clamp(point.y - drag.pointerOffsetY, 0, 100 - baseLayout.h);
           return {
@@ -906,6 +966,35 @@ export default function Page() {
       window.removeEventListener("mouseup", handleMouseUp);
     };
   }, [getCanvasPercentPoint, layoutDrag, selectedFloorId]);
+
+  useEffect(() => {
+    const canvas = layoutCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    function handleWheel(event: WheelEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = canvas.getBoundingClientRect();
+      const pointerX = event.clientX - rect.left;
+      const pointerY = event.clientY - rect.top;
+      const factor = event.deltaY > 0 ? 0.92 : 1.08;
+      setLayoutView((prev) => {
+        const nextScale = clamp(prev.scale * factor, 0.5, 4);
+        const logicalX = (pointerX - prev.offsetX) / prev.scale;
+        const logicalY = (pointerY - prev.offsetY) / prev.scale;
+        return {
+          scale: nextScale,
+          offsetX: pointerX - logicalX * nextScale,
+          offsetY: pointerY - logicalY * nextScale,
+        };
+      });
+    }
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener("wheel", handleWheel);
+    };
+  }, []);
 
   const allocationMatrix = useMemo(() => {
     if (!manualAllocations.length && !result) {
@@ -1162,6 +1251,27 @@ export default function Page() {
     setProximityRequests((prev) => prev.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
   }
 
+  function updateSelectedBenchRotation(value: number) {
+    if (!selectedBenchOnFloor) {
+      return;
+    }
+    setBenches((prev) =>
+      prev.map((bench, index) => {
+        if (bench.id !== selectedBenchOnFloor.id) {
+          return bench;
+        }
+        const baseLayout = bench.layout ?? defaultLayoutForIndex(index);
+        return {
+          ...bench,
+          layout: {
+            ...baseLayout,
+            rotation: normalizeRotation(value),
+          },
+        };
+      }),
+    );
+  }
+
   function switchScenario(nextScenarioId: string) {
     const scenario = scenarios.find((item) => item.id === nextScenarioId);
     if (!scenario) {
@@ -1283,7 +1393,38 @@ export default function Page() {
     });
   }
 
-  function startLayoutResize(event: ReactMouseEvent<HTMLDivElement>, bench: Bench) {
+  function startLayoutRotate(event: ReactMouseEvent<HTMLElement>, bench: Bench) {
+    if (!bench.layout) {
+      return;
+    }
+    const canvas = layoutCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const centerLocalX = ((bench.layout.x + bench.layout.w / 2) / 100) * rect.width;
+    const centerLocalY = ((bench.layout.y + bench.layout.h / 2) / 100) * rect.height;
+    const centerClientX = rect.left + layoutView.offsetX + centerLocalX * layoutView.scale;
+    const centerClientY = rect.top + layoutView.offsetY + centerLocalY * layoutView.scale;
+    const startAngle = angleFromCenter(event.clientX, event.clientY, centerClientX, centerClientY);
+    event.preventDefault();
+    event.stopPropagation();
+    setLayoutDrag({
+      mode: "rotate",
+      benchId: bench.id,
+      pointerOffsetX: 0,
+      pointerOffsetY: 0,
+      initialRotation: normalizeRotation(Number(bench.layout.rotation ?? 0)),
+      rotateCenterClientX: centerClientX,
+      rotateCenterClientY: centerClientY,
+      rotatePointerStartAngle: startAngle,
+      viewScale: layoutView.scale,
+      viewOffsetX: layoutView.offsetX,
+      viewOffsetY: layoutView.offsetY,
+    });
+  }
+
+  function startLayoutResize(event: ReactMouseEvent<HTMLElement>, bench: Bench) {
     if (!bench.layout) {
       return;
     }
@@ -1316,28 +1457,6 @@ export default function Page() {
       viewScale: layoutView.scale,
       viewOffsetX: layoutView.offsetX,
       viewOffsetY: layoutView.offsetY,
-    });
-  }
-
-  function handleLayoutWheel(event: React.WheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const canvas = layoutCanvasRef.current;
-    if (!canvas) {
-      return;
-    }
-    const rect = canvas.getBoundingClientRect();
-    const pointerX = event.clientX - rect.left;
-    const pointerY = event.clientY - rect.top;
-    const factor = event.deltaY > 0 ? 0.92 : 1.08;
-    setLayoutView((prev) => {
-      const nextScale = clamp(prev.scale * factor, 0.5, 4);
-      const logicalX = (pointerX - prev.offsetX) / prev.scale;
-      const logicalY = (pointerY - prev.offsetY) / prev.scale;
-      return {
-        scale: nextScale,
-        offsetX: pointerX - logicalX * nextScale,
-        offsetY: pointerY - logicalY * nextScale,
-      };
     });
   }
 
@@ -1386,6 +1505,7 @@ export default function Page() {
         const ly = Number(bench.layout?.y);
         const lw = Number(bench.layout?.w);
         const lh = Number(bench.layout?.h);
+        const lr = Number(bench.layout?.rotation ?? 0);
         const hasLayout = [lx, ly, lw, lh].every((value) => Number.isFinite(value));
         const layout = hasLayout
           ? {
@@ -1393,6 +1513,7 @@ export default function Page() {
               h: clamp(lh, 1, 100),
               x: 0,
               y: 0,
+              rotation: normalizeRotation(lr),
             }
           : defaultLayoutForIndex(index);
         layout.x = clamp(hasLayout ? lx : layout.x, 0, 100 - layout.w);
@@ -1678,10 +1799,17 @@ export default function Page() {
       setBenches((prev) =>
         prev.map((bench, index) => {
           const match = parsed.benches.find((item) => item.id === bench.id);
+          const layoutCandidate = match?.layout ?? bench.layout ?? defaultLayoutForIndex(index);
+          const normalizedLayout = layoutCandidate
+            ? {
+                ...layoutCandidate,
+                rotation: normalizeRotation(Number(layoutCandidate.rotation ?? 0)),
+              }
+            : undefined;
           return {
             ...bench,
             floorId: match?.floorId ?? bench.floorId ?? parsed.floors[0]?.id ?? "F1",
-            layout: match?.layout ?? bench.layout ?? defaultLayoutForIndex(index),
+            layout: normalizedLayout,
           };
         }),
       );
@@ -1719,6 +1847,7 @@ export default function Page() {
       const yIdx = headers.indexOf("y");
       const wIdx = headers.indexOf("w");
       const hIdx = headers.indexOf("h");
+      const rotationIdx = headers.indexOf("rotation");
       if (idIdx < 0 || capIdx < 0 || orderIdx < 0) {
         setError("Benches CSV must include id, capacity, order headers.");
         setImportFeedback((prev) => ({ ...prev, benches: `Failed: ${file.name} (invalid headers)` }));
@@ -1731,13 +1860,14 @@ export default function Page() {
         const y = yIdx >= 0 ? Number(row[yIdx]) : Number.NaN;
         const w = wIdx >= 0 ? Number(row[wIdx]) : Number.NaN;
         const h = hIdx >= 0 ? Number(row[hIdx]) : Number.NaN;
+        const rotation = rotationIdx >= 0 ? Number(row[rotationIdx]) : 0;
         const hasLayout = [x, y, w, h].every((value) => Number.isFinite(value));
         return {
           id: row[idIdx],
           capacity: Number(row[capIdx]),
           order: Number(row[orderIdx]),
           floorId,
-          layout: hasLayout ? { x, y, w, h } : defaultLayoutForIndex(index),
+          layout: hasLayout ? { x, y, w, h, rotation: normalizeRotation(rotation) } : defaultLayoutForIndex(index),
         };
       });
 
@@ -1881,6 +2011,7 @@ export default function Page() {
               y: Number(bench.layout.y),
               w: Number(bench.layout.w),
               h: Number(bench.layout.h),
+              rotation: normalizeRotation(Number(bench.layout.rotation ?? 0)),
             }
           : undefined,
       })),
@@ -2080,29 +2211,26 @@ export default function Page() {
         <p className="metric-row">{autosaveStatus}</p>
       </section>
 
-      <CollapsibleSection title="CSV Templates" description="Download starter files, fill them, then upload below." defaultOpen={false}>
-        <div className="template-links">
-          <a href="/templates/benches.csv" download>
-            benches.csv
-          </a>
-          <a href="/templates/teams.csv" download>
-            teams.csv
-          </a>
-          <a href="/templates/preallocations.csv" download>
-            preallocations.csv
-          </a>
-        </div>
-      </CollapsibleSection>
-
       <CollapsibleSection
         className="grid-two"
-        title="Import & Policy"
-        description="Import CSVs and choose solver/flex policy."
+        title="Step 0: Import & Policy"
+        description="Load data and choose solver/flex policy."
         defaultOpen
       >
         <div>
           <h3>Import Data</h3>
           <p className="subtle">CSV imports replace one table. Config JSON restores a full session in one step.</p>
+          <div className="template-links">
+            <a href="/templates/benches.csv" download>
+              benches.csv
+            </a>
+            <a href="/templates/teams.csv" download>
+              teams.csv
+            </a>
+            <a href="/templates/preallocations.csv" download>
+              preallocations.csv
+            </a>
+          </div>
           <label>
             Session config JSON
             <input type="file" accept=".json,application/json" onChange={importSessionConfig} />
@@ -2174,14 +2302,7 @@ export default function Page() {
         </div>
       </CollapsibleSection>
 
-      <section className="panel run-panel">
-        <button className="cta" onClick={runPlanner} disabled={loading}>
-          {loading ? "Generating plan..." : "Generate plan"}
-        </button>
-        {error ? <p className="error">{error}</p> : null}
-      </section>
-
-      <CollapsibleSection title="Benches" description="Order defines bench proximity." defaultOpen={false}>
+      <CollapsibleSection title="Step 1: Benches" description="Define bench IDs, capacity, and floor." defaultOpen={false}>
         <table>
           <thead>
             <tr>
@@ -2246,8 +2367,8 @@ export default function Page() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="Floor Layout Editor"
-        description="Import a floor image and drag benches on top to drive automatic geometric proximity."
+        title="Step 2: Floor Layout Editor"
+        description="Place benches on the floor image, then rotate/resize for angled walls."
         defaultOpen={false}
       >
         <div className="layout-toolbar">
@@ -2333,6 +2454,37 @@ export default function Page() {
             />
             Heatmap
           </label>
+          <div className="layout-rotation-controls">
+            <span>{selectedBenchOnFloor ? `Rotate ${selectedBenchOnFloor.id}` : "Select a bench to rotate"}</span>
+            <button
+              onClick={() =>
+                updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) - 15)
+              }
+              disabled={!selectedBenchOnFloor}
+            >
+              -15°
+            </button>
+            <input
+              type="number"
+              min={-180}
+              max={180}
+              step={1}
+              value={selectedBenchOnFloor ? Math.round(Number(selectedBenchOnFloor.layout?.rotation ?? 0)) : 0}
+              onChange={(event) => updateSelectedBenchRotation(Number(event.target.value))}
+              disabled={!selectedBenchOnFloor}
+            />
+            <button
+              onClick={() =>
+                updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) + 15)
+              }
+              disabled={!selectedBenchOnFloor}
+            >
+              +15°
+            </button>
+            <button onClick={() => updateSelectedBenchRotation(0)} disabled={!selectedBenchOnFloor}>
+              Reset
+            </button>
+          </div>
         </div>
         <p className="metric-row">
           Drag bench blocks to set position. Layout profile JSON can be re-imported after code updates and reused for future
@@ -2342,7 +2494,6 @@ export default function Page() {
           className={`layout-canvas ${layoutDrag?.mode === "pan" ? "is-panning" : ""}`}
           ref={layoutCanvasRef}
           onMouseDown={startLayoutPan}
-          onWheel={handleLayoutWheel}
         >
           <div
             className="layout-scene"
@@ -2430,6 +2581,7 @@ export default function Page() {
                     backgroundColor: benchBg,
                     borderColor: benchBorder,
                     color: rgbCss(benchText),
+                    transform: `rotate(${normalizeRotation(Number(layout.rotation ?? 0))}deg)`,
                   }}
                   onMouseDown={(event) => {
                     if (!bench.layout) {
@@ -2446,22 +2598,35 @@ export default function Page() {
                   <small className="bench-seat-value" style={{ fontSize: `${sizing.seat}px` }}>
                     {bench.capacity}
                   </small>
-                  <div
-                    className="bench-resize-handle"
-                    onMouseDown={(event) => {
-                      setSelectedBenchId(bench.id);
-                      startLayoutResize(event, { ...bench, layout });
-                    }}
-                    onClick={(event) => event.stopPropagation()}
-                    title="Resize bench"
-                  />
+                  {isSelectedBench ? (
+                    <>
+                      <button
+                        type="button"
+                        className="bench-rotate-handle"
+                        onMouseDown={(event) => startLayoutRotate(event, { ...bench, layout })}
+                        onClick={(event) => event.stopPropagation()}
+                        title={`Rotate ${bench.id}`}
+                        aria-label={`Rotate ${bench.id}`}
+                      />
+                      <button
+                        type="button"
+                        className="bench-resize-handle"
+                        onMouseDown={(event) => startLayoutResize(event, { ...bench, layout })}
+                        onClick={(event) => event.stopPropagation()}
+                        title={`Resize ${bench.id}`}
+                        aria-label={`Resize ${bench.id}`}
+                      />
+                    </>
+                  ) : null}
                 </div>
               );
             })}
           </div>
         </div>
         <p className="metric-row">
-          Tips: Click a bench to focus it. Drag empty canvas to pan. Scroll to zoom. Drag bench corner handle to resize.
+          Tips: Click a bench to focus it. Drag empty canvas to pan. Scroll to zoom. Drag the top circular handle to rotate
+          (hold Shift to snap by 15 degrees), and drag the subtle bottom-right corner grip to resize.
+          Use the rotation controls for angled walls.
           {isLayoutPlanViewActive
             ? ` Day overlay reflects ${layoutDayView} allocations from the current plan.`
             : " Plan overlay is OFF. Switch to a day to preview allocations on benches."}
@@ -2491,8 +2656,8 @@ export default function Page() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="Teams"
-        description="Preferred days use equal weights. Optionally require contiguous office days."
+        title="Step 3: Teams"
+        description="Set team size, target days, contiguous requirement, and preferred days."
         defaultOpen={false}
       >
         <table>
@@ -2580,8 +2745,8 @@ export default function Page() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="Team Proximity Requests"
-        description="Optional: ask teams to be seated near each other when they are in-office on the same day."
+        title="Step 4: Team Proximity Requests"
+        description="Optional: request teams to sit near each other when they attend on the same day."
         defaultOpen={false}
       >
         <table>
@@ -2661,8 +2826,8 @@ export default function Page() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="Pre-allocations"
-        description="These seats are removed from available bench capacity. You can select multiple days per row."
+        title="Step 5: Pre-allocations"
+        description="Reserve seats by bench/day before planning. Multiple days per row are supported."
         defaultOpen={false}
       >
         <table>
@@ -2730,6 +2895,14 @@ export default function Page() {
           Add pre-allocation
         </button>
       </CollapsibleSection>
+
+      <section className="panel run-panel">
+        <p className="subtle run-step">Step 6: Generate the plan once setup is complete.</p>
+        <button className="cta" onClick={runPlanner} disabled={loading}>
+          {loading ? "Generating plan..." : "Generate plan"}
+        </button>
+        {error ? <p className="error">{error}</p> : null}
+      </section>
 
       {result ? (
         <>
