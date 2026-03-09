@@ -606,6 +606,7 @@ export default function Page() {
   const [manualError, setManualError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [printGeneratedAt, setPrintGeneratedAt] = useState<string>("");
   const layoutCanvasRef = useRef<HTMLDivElement | null>(null);
 
   const benchesByOrder = useMemo(() => [...benches].sort((a, b) => a.order - b.order), [benches]);
@@ -2142,6 +2143,28 @@ export default function Page() {
     downloadCsv("team_view_plan.csv", rows);
   }
 
+  function exportBenchPlanA4Pdf() {
+    if (!result) {
+      return;
+    }
+    setError(null);
+    setPrintGeneratedAt(new Date().toLocaleString());
+    document.body.classList.add("bench-print-mode");
+    let cleanupTimeout = 0;
+    const cleanup = () => {
+      window.clearTimeout(cleanupTimeout);
+      document.body.classList.remove("bench-print-mode");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    cleanupTimeout = window.setTimeout(cleanup, 15000);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.print();
+      });
+    });
+  }
+
   const explainability = useMemo(() => {
     if (!result) {
       return null;
@@ -2169,7 +2192,7 @@ export default function Page() {
         <p className="kicker">Office Allocation Planner</p>
         <h1>Build weekly bench-by-day plans with fairness-first scheduling</h1>
         <p>
-          Configure benches, teams, pre-allocations, and flex reserve. The planner enforces capacity and full-team attendance
+          Configure benches, teams, pre-allocations, and flex targets. The planner enforces capacity and full-team attendance
           days, then compares fairness-first vs efficiency-first outcomes.
         </p>
       </section>
@@ -2214,7 +2237,7 @@ export default function Page() {
       <CollapsibleSection
         className="grid-two"
         title="Step 0: Import & Policy"
-        description="Load data and choose solver/flex policy."
+        description="Load data and choose solver/flex target policy."
         defaultOpen
       >
         <div>
@@ -2265,7 +2288,7 @@ export default function Page() {
             </select>
           </label>
           <label>
-            Flex default % of total seats
+            Flex target default % of total seats
             <input type="number" value={flexDefault} min={0} max={100} onChange={(e) => setFlexDefault(Number(e.target.value))} />
           </label>
           <div className="flex-grid">
@@ -2523,15 +2546,24 @@ export default function Page() {
                 ? teamColorMap[daySummary.topTeamId] ??
                   TEAM_BASE_COLORS[hashTeam(daySummary.topTeamId) % TEAM_BASE_COLORS.length]
                 : "#0057b8";
+              const isEmptyBench = isLayoutPlanViewActive && (daySummary?.usedSeats ?? 0) === 0;
               const occupancyRatio = bench.capacity > 0 ? (daySummary?.usedSeats ?? 0) / bench.capacity : 0;
               const layerColor = showHeatmap && isLayoutPlanViewActive ? heatColorByRatio(occupancyRatio) : dominantTeamColor;
               const dominantRgb = hexToRgb(layerColor);
-              const benchBgRgb = mixRgb(dominantRgb, [255, 255, 255], isLayoutPlanViewActive ? 0.18 : 0.4);
+              const benchBgRgb: [number, number, number] = isEmptyBench
+                ? [230, 236, 242]
+                : mixRgb(dominantRgb, [255, 255, 255], isLayoutPlanViewActive ? 0.18 : 0.4);
               const benchBg = rgbCss(benchBgRgb);
-              const benchBorder = rgbCss(mixRgb(hexToRgb(dominantTeamColor), [0, 0, 0], 0.15));
+              const benchBorder = isEmptyBench
+                ? "#8b9bad"
+                : rgbCss(mixRgb(hexToRgb(dominantTeamColor), [0, 0, 0], 0.15));
               const darkText: [number, number, number] = [16, 42, 74];
               const lightText: [number, number, number] = [255, 255, 255];
-              const benchText = contrastRatio(benchBgRgb, darkText) >= contrastRatio(benchBgRgb, lightText) ? darkText : lightText;
+              const benchText: [number, number, number] = isEmptyBench
+                ? [45, 65, 90]
+                : contrastRatio(benchBgRgb, darkText) >= contrastRatio(benchBgRgb, lightText)
+                  ? darkText
+                  : lightText;
               const hoverTitle = (() => {
                 if (!isLayoutPlanViewActive) {
                   return `${bench.id} (${bench.capacity} seats)`;
@@ -2569,7 +2601,12 @@ export default function Page() {
               return (
                 <div
                   key={`layout-${bench.id}`}
-                  className={["bench-block", isSelectedBench ? "is-selected" : "", isDimmed ? "is-dimmed" : ""]
+                  className={[
+                    "bench-block",
+                    isSelectedBench ? "is-selected" : "",
+                    isDimmed ? "is-dimmed" : "",
+                    isEmptyBench ? "is-empty" : "",
+                  ]
                     .filter(Boolean)
                     .join(" ")}
                   style={{
@@ -2580,6 +2617,7 @@ export default function Page() {
                     zIndex: isSelectedBench ? 40 : 2,
                     backgroundColor: benchBg,
                     borderColor: benchBorder,
+                    borderStyle: isEmptyBench ? "dashed" : "solid",
                     color: rgbCss(benchText),
                     transform: `rotate(${normalizeRotation(Number(layout.rotation ?? 0))}deg)`,
                   }}
@@ -2918,7 +2956,7 @@ export default function Page() {
               <div className="export-actions">
                 <button onClick={exportBenchPlanCsv}>Export bench x day CSV</button>
                 <button onClick={exportTeamViewCsv}>Export team view CSV</button>
-                <button onClick={() => window.print()}>Print / Save PDF</button>
+                <button onClick={exportBenchPlanA4Pdf}>Export Bench x Day A4 PDF</button>
               </div>
             </div>
             <div>
@@ -3129,7 +3167,7 @@ export default function Page() {
               </p>
               {explainability.diagnostics.relaxedApplied ? (
                 <p className="warning">
-                  Auto-relax was applied because exact full-day targets were infeasible with capacity, pre-allocations, and flex reserve.
+                  Auto-relax was applied because exact full-day targets were infeasible with current capacity and pre-allocations.
                 </p>
               ) : (
                 <p className="metric-row">Exact target constraints were feasible in this run.</p>
@@ -3159,7 +3197,7 @@ export default function Page() {
 
           <CollapsibleSection
             title="Daily Usage"
-            description="Allocated seats, preallocated seats, and flex reserve."
+            description="Allocated seats, preallocated seats, and flex seats allocated from leftover capacity."
             defaultOpen={false}
           >
             <table>
@@ -3168,7 +3206,7 @@ export default function Page() {
                   <th>Day</th>
                   <th>Allocated</th>
                   <th>Preallocated</th>
-                  <th>Flex</th>
+                  <th>Flex allocated</th>
                   <th>Total seats</th>
                   <th>Occupancy %</th>
                 </tr>
@@ -3187,6 +3225,71 @@ export default function Page() {
               </tbody>
             </table>
           </CollapsibleSection>
+
+          <section
+            className={`bench-print-sheet ${benchesByOrder.length >= 28 ? "is-many-rows" : benchesByOrder.length <= 12 ? "is-few-rows" : ""}`.trim()}
+            aria-hidden="true"
+          >
+            <div className="bench-print-head">
+              <h1>Bench x Day Plan - {activeScenario?.name?.trim() || "Scenario"}</h1>
+              <p>{printGeneratedAt ? `Generated ${printGeneratedAt}` : ""}</p>
+            </div>
+            <table className="bench-print-table">
+              <thead>
+                <tr>
+                  <th>Bench (Seats)</th>
+                  {DAYS.map((day) => (
+                    <th key={`print-${day}`}>{day}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {benchesByOrder.map((bench) => (
+                  <tr key={`print-row-${bench.id}`}>
+                    <th>
+                      {bench.id} ({bench.capacity})
+                    </th>
+                    {DAYS.map((day) => {
+                      const prealloc = preallocationMatrix[bench.id]?.[day] ?? [];
+                      const plan = allocationMatrix[bench.id]?.[day] ?? [];
+                      const entries = [...prealloc, ...plan];
+                      return (
+                        <td key={`print-cell-${bench.id}-${day}`}>
+                          {entries.length ? (
+                            <div className="bench-print-cell-list">
+                              {entries.map((item, index) => {
+                                const className = [
+                                  "bench-print-chip",
+                                  item.kind === "flex" ? "is-flex" : "",
+                                  item.kind === "prealloc" ? "is-prealloc" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ");
+                                const style =
+                                  item.kind === "team" && item.teamId
+                                    ? teamChipStyle(
+                                        teamColorMap[item.teamId] ??
+                                          TEAM_BASE_COLORS[hashTeam(item.teamId) % TEAM_BASE_COLORS.length],
+                                      )
+                                    : undefined;
+                                return (
+                                  <span key={`print-entry-${bench.id}-${day}-${index}`} className={className} style={style}>
+                                    {formatBlockLabel(item)}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <span className="bench-print-empty">-</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
         </>
       ) : null}
     </main>

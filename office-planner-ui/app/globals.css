@@ -353,6 +353,11 @@ h3 {
   filter: saturate(0.72);
 }
 
+.bench-block.is-empty {
+  border-width: 2px;
+  border-style: dashed;
+}
+
 .heatmap-legend {
   margin-top: 8px;
   display: inline-flex;
@@ -645,18 +650,153 @@ th {
   margin: 0;
 }
 
+.bench-print-sheet {
+  display: none;
+}
+
+@page {
+  size: A4 landscape;
+  margin: 8mm;
+}
+
 @media print {
-  .hero,
-  input,
-  select,
-  button,
-  .template-links {
+  body.bench-print-mode .page > * {
     display: none !important;
   }
 
-  .page {
+  body.bench-print-mode .page > .bench-print-sheet {
+    display: block !important;
+  }
+
+  body.bench-print-mode .page {
     max-width: 100%;
     padding: 0;
+  }
+
+  body.bench-print-mode .bench-print-sheet {
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #0f2543;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.bench-print-mode .bench-print-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8mm;
+    margin-bottom: 3mm;
+  }
+
+  body.bench-print-mode .bench-print-head h1 {
+    margin: 0;
+    font-size: 13pt;
+    color: #17395f;
+  }
+
+  body.bench-print-mode .bench-print-head p {
+    margin: 0;
+    font-size: 8pt;
+    color: #355f91;
+    white-space: nowrap;
+  }
+
+  body.bench-print-mode .bench-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 6.9pt;
+  }
+
+  body.bench-print-mode .bench-print-table th,
+  body.bench-print-mode .bench-print-table td {
+    border: 0.2mm solid #9ab4d4;
+    padding: 1.2mm 1mm;
+    vertical-align: top;
+  }
+
+  body.bench-print-mode .bench-print-table thead th {
+    background: #e8f0fb;
+    color: #17395f;
+    font-size: 7.7pt;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  body.bench-print-mode .bench-print-table thead th:first-child {
+    width: 15%;
+  }
+
+  body.bench-print-mode .bench-print-table tbody th {
+    background: #f7faff;
+    color: #17395f;
+    font-size: 7pt;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  body.bench-print-mode .bench-print-cell-list span {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 0.8mm 0.8mm 0;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  body.bench-print-mode .bench-print-cell-list span:last-child {
+    margin-bottom: 0;
+  }
+
+  body.bench-print-mode .bench-print-chip {
+    border: 0.2mm solid #8fb1d9;
+    border-radius: 999px;
+    padding: 0.5mm 1.1mm;
+    color: #102a4a;
+    background: #f4f8ff;
+    font-weight: 600;
+    font-size: 6.3pt;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  body.bench-print-mode .bench-print-chip.is-flex {
+    background: #e4f7ff;
+    border-color: #8fd3ef;
+    color: #104062;
+  }
+
+  body.bench-print-mode .bench-print-chip.is-prealloc {
+    background:
+      repeating-linear-gradient(
+        -45deg,
+        #dde8f7 0,
+        #dde8f7 6px,
+        #ebf3ff 6px,
+        #ebf3ff 12px
+      );
+    border-color: #7ea2cf;
+    color: #20487a;
+  }
+
+  body.bench-print-mode .bench-print-empty {
+    color: #6f87a8;
+  }
+
+  body.bench-print-mode .bench-print-sheet.is-few-rows .bench-print-table {
+    font-size: 7.3pt;
+  }
+
+  body.bench-print-mode .bench-print-sheet.is-many-rows .bench-print-table {
+    font-size: 6.2pt;
+  }
+
+  body.bench-print-mode .bench-print-sheet.is-many-rows .bench-print-table thead th {
+    font-size: 7.1pt;
+  }
+
+  body.bench-print-mode .bench-print-sheet.is-many-rows .bench-print-table tbody th {
+    font-size: 6.5pt;
   }
 }
 

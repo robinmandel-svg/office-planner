@@ -146,7 +146,8 @@ function buildCapacityContext(input: PlannerInput): CapacityContext {
   const dayCapacity = emptyDayMap(0);
   for (const day of DAYS) {
     const usable = benchesByOrder.reduce((acc, bench) => acc + benchAvailability[day][bench.id], 0);
-    dayCapacity[day] = Math.max(0, usable - dayFlex[day]);
+    // Flex is a soft target: reserve after team seating/proximity, not before.
+    dayCapacity[day] = Math.max(0, usable);
   }
 
   return { totalSeats, benchesByOrder, benchAvailability, dayCapacity, dayPreallocated, dayFlex };
@@ -737,11 +738,16 @@ function buildTeamDiagnostics(teams: Team[], assignments: AssignmentMap): TeamDi
 
 function buildDayDiagnostics(
   allocations: BenchAllocation[],
+  flexAllocations: FlexAllocation[],
   capacity: CapacityContext,
 ): DayDiagnostics[] {
   const allocatedByDay = emptyDayMap(0);
   for (const item of allocations) {
     allocatedByDay[item.day] += item.seats;
+  }
+  const flexByDay = emptyDayMap(0);
+  for (const item of flexAllocations) {
+    flexByDay[item.day] += item.seats;
   }
 
   return DAYS.map((day) => {
@@ -750,7 +756,7 @@ function buildDayDiagnostics(
       day,
       allocatedSeats,
       preallocatedSeats: capacity.dayPreallocated[day],
-      flexSeats: capacity.dayFlex[day],
+      flexSeats: flexByDay[day],
       totalSeats: capacity.totalSeats,
       occupancyPercent: capacity.totalSeats > 0 ? (allocatedSeats / capacity.totalSeats) * 100 : 0,
     };
@@ -775,7 +781,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
   );
 
   const teamDiagnostics = buildTeamDiagnostics(input.teams, assignmentResult.assignments);
-  const dayDiagnostics = buildDayDiagnostics(allocations, capacity);
+  const dayDiagnostics = buildDayDiagnostics(allocations, flexAllocations, capacity);
   const fairnessMinRatio = teamDiagnostics.reduce((min, row) => Math.min(min, row.fulfillmentRatio), 1);
   const totalFulfilledDays = teamDiagnostics.reduce((acc, row) => acc + row.assignedDays, 0);
 
