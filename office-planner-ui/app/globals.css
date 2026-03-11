@@ -592,6 +592,16 @@ th {
   cursor: grabbing;
 }
 
+.chip-drag-preview {
+  position: fixed;
+  transform: translate(0, 0);
+  pointer-events: none;
+  margin: 0;
+  z-index: 5000;
+  opacity: 0.96;
+  box-shadow: 0 6px 16px rgba(8, 31, 58, 0.28);
+}
+
 .alloc-chip-flex {
   background: #e4f7ff;
   border-color: #8fd3ef;

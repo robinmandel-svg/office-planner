@@ -141,6 +141,16 @@ type AllocationBlock = {
   teamId?: string;
 };
 
+type ChipDragPreview = {
+  label: string;
+  className: string;
+  style?: CSSProperties;
+  x: number;
+  y: number;
+  offsetX: number;
+  offsetY: number;
+};
+
 const initialBenches: Bench[] = [
   { id: "B1", capacity: 10, order: 1, floorId: "F1", layout: { x: 10, y: 20, w: 8, h: 5 } },
   { id: "B2", capacity: 10, order: 2, floorId: "F1", layout: { x: 22, y: 20, w: 8, h: 5 } },
@@ -607,7 +617,9 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [printGeneratedAt, setPrintGeneratedAt] = useState<string>("");
+  const [chipDragPreview, setChipDragPreview] = useState<ChipDragPreview | null>(null);
   const layoutCanvasRef = useRef<HTMLDivElement | null>(null);
+  const transparentDragImageRef = useRef<HTMLImageElement | null>(null);
 
   const benchesByOrder = useMemo(() => [...benches].sort((a, b) => a.order - b.order), [benches]);
   const activeScenario = useMemo(
@@ -994,6 +1006,15 @@ export default function Page() {
     canvas.addEventListener("wheel", handleWheel, { passive: false });
     return () => {
       canvas.removeEventListener("wheel", handleWheel);
+    };
+  }, []);
+
+  useEffect(() => {
+    const img = new window.Image();
+    img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    transparentDragImageRef.current = img;
+    return () => {
+      transparentDragImageRef.current = null;
     };
   }, []);
 
@@ -2082,7 +2103,7 @@ export default function Page() {
     return `${item.teamId ?? "Team"} (${item.seats})`;
   }
 
-  function moveAllocation(blockId: string, benchId: string, day: Day) {
+  function moveAllocation(blockId: string, benchId: string, day: Day, swapWithBlockId?: string) {
     const moving = manualAllocations.find((item) => item.id === blockId);
     if (!moving) {
       return;
@@ -2090,19 +2111,60 @@ export default function Page() {
     if (moving.benchId === benchId && moving.day === day) {
       return;
     }
-    const capacity = cellCapacity[`${benchId}-${day}`] ?? 0;
-    const targetUsed = manualAllocations
-      .filter((item) => item.id !== blockId && item.benchId === benchId && item.day === day)
+    const targetKey = `${benchId}-${day}`;
+    const sourceKey = `${moving.benchId}-${moving.day}`;
+    const targetCapacity = cellCapacity[targetKey] ?? 0;
+    const sourceCapacity = cellCapacity[sourceKey] ?? 0;
+    const targetBlocks = manualAllocations.filter((item) => item.id !== blockId && item.benchId === benchId && item.day === day);
+    const targetUsed = targetBlocks
       .reduce((acc, item) => acc + item.seats, 0);
-    if (targetUsed + moving.seats > capacity) {
+    if (targetUsed + moving.seats <= targetCapacity) {
+      setManualAllocations((prev) =>
+        prev.map((item) => (item.id === blockId ? { ...item, benchId, day } : item)),
+      );
+      setManualError(null);
+      return;
+    }
+
+    const sourceUsedWithoutMoving = manualAllocations
+      .filter((item) => item.id !== blockId && item.benchId === moving.benchId && item.day === moving.day)
+      .reduce((acc, item) => acc + item.seats, 0);
+    const orderedCandidates = (() => {
+      const candidates = targetBlocks.filter((item) => (swapWithBlockId ? item.id === swapWithBlockId : true));
+      return [...candidates].sort((a, b) => {
+        const kindPenaltyA = a.kind === moving.kind ? 0 : 1;
+        const kindPenaltyB = b.kind === moving.kind ? 0 : 1;
+        if (kindPenaltyA !== kindPenaltyB) {
+          return kindPenaltyA - kindPenaltyB;
+        }
+        return Math.abs(a.seats - moving.seats) - Math.abs(b.seats - moving.seats);
+      });
+    })();
+
+    const swapCandidate = orderedCandidates.find((candidate) => {
+      const nextTargetUsed = targetUsed - candidate.seats + moving.seats;
+      const nextSourceUsed = sourceUsedWithoutMoving + candidate.seats;
+      return nextTargetUsed <= targetCapacity && nextSourceUsed <= sourceCapacity;
+    });
+
+    if (!swapCandidate) {
+      const targetProjected = targetUsed + moving.seats;
       setManualError(
-        `Cannot move ${formatBlockLabel(moving)} to ${benchId} ${day}. Capacity would be exceeded (${targetUsed + moving.seats}/${capacity}).`,
+        `Cannot move ${formatBlockLabel(moving)} to ${benchId} ${day}. Capacity would be exceeded (${targetProjected}/${targetCapacity}). Try dropping on a specific chip to swap.`,
       );
       return;
     }
 
     setManualAllocations((prev) =>
-      prev.map((item) => (item.id === blockId ? { ...item, benchId, day } : item)),
+      prev.map((item) => {
+        if (item.id === blockId) {
+          return { ...item, benchId, day };
+        }
+        if (item.id === swapCandidate.id) {
+          return { ...item, benchId: moving.benchId, day: moving.day };
+        }
+        return item;
+      }),
     );
     setManualError(null);
   }
@@ -2962,6 +3024,7 @@ export default function Page() {
             <div>
               <h3>Manual Adjustments</h3>
               <p className="subtle">Drag allocation chips across cells to fine-tune the plan.</p>
+              <p className="subtle">If a cell is full, drop on a specific chip to swap allocations.</p>
               <p className="metric-row">Moved chips: {movedBlocksCount}</p>
               <button onClick={() => setManualAllocations(baselineAllocations)}>Reset manual moves</button>
               {manualError ? <p className="error">{manualError}</p> : null}
@@ -3011,11 +3074,29 @@ export default function Page() {
                       <td
                         key={`${bench.id}-${day}`}
                         className={activeDragId ? "drop-target" : undefined}
-                        onDragOver={(event) => event.preventDefault()}
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          if (!activeDragId) {
+                            return;
+                          }
+                          setChipDragPreview((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  x: event.clientX - prev.offsetX,
+                                  y: event.clientY - prev.offsetY,
+                                }
+                              : prev,
+                          );
+                        }}
                         onDrop={(event) => {
                           event.preventDefault();
                           const blockId = event.dataTransfer.getData("text/plain");
-                          moveAllocation(blockId, bench.id, day);
+                          const target = event.target as HTMLElement;
+                          const swapChip = target.closest<HTMLElement>("[data-swap-block-id]");
+                          const swapWithBlockId = swapChip?.dataset.swapBlockId;
+                          moveAllocation(blockId, bench.id, day, swapWithBlockId);
+                          setChipDragPreview(null);
                           setActiveDragId(null);
                         }}
                       >
@@ -3026,9 +3107,8 @@ export default function Page() {
                             </span>
                           ))}
                           {(allocationMatrix[bench.id]?.[day] ?? []).map((item) => (
-                            <span
-                              key={item.id}
-                              className={[
+                            (() => {
+                              const className = [
                                 "alloc-chip",
                                 item.kind === "flex" ? "alloc-chip-flex" : "",
                                 item.kind === "team" && selectedTeamId
@@ -3039,37 +3119,82 @@ export default function Page() {
                                 item.kind !== "team" && selectedTeamId ? "alloc-chip-muted" : "",
                               ]
                                 .filter(Boolean)
-                                .join(" ")}
-                              draggable={item.kind !== "prealloc"}
-                              onDragStart={(event) => {
-                                if (item.kind === "prealloc") {
-                                  return;
-                                }
-                                event.dataTransfer.setData("text/plain", item.id);
-                                setActiveDragId(item.id);
-                              }}
-                              onDragEnd={() => {
-                                if (item.kind !== "prealloc") {
-                                  setActiveDragId(null);
-                                }
-                              }}
-                              onClick={() => {
-                                if (item.kind !== "team" || !item.teamId) {
-                                  return;
-                                }
-                                setSelectedTeamId((prev) => (prev === item.teamId ? null : item.teamId));
-                              }}
-                              style={
+                                .join(" ");
+                              const style =
                                 item.kind === "team"
                                   ? teamChipStyle(
                                       teamColorMap[item.teamId ?? ""] ??
                                         TEAM_BASE_COLORS[hashTeam(item.teamId ?? "team") % TEAM_BASE_COLORS.length],
                                     )
-                                  : undefined
-                              }
-                            >
-                              {formatBlockLabel(item)}
-                            </span>
+                                  : undefined;
+                              return (
+                                <span
+                                  key={item.id}
+                                  className={className}
+                                  draggable={item.kind !== "prealloc"}
+                                  data-swap-block-id={item.id}
+                                  onDragStart={(event) => {
+                                    if (item.kind === "prealloc") {
+                                      return;
+                                    }
+                                    const chipRect = event.currentTarget.getBoundingClientRect();
+                                    const pointerOffsetX = Math.max(
+                                      0,
+                                      Math.min(chipRect.width - 1, event.clientX - chipRect.left),
+                                    );
+                                    const pointerOffsetY = Math.max(
+                                      0,
+                                      Math.min(chipRect.height - 1, event.clientY - chipRect.top),
+                                    );
+                                    event.dataTransfer.effectAllowed = "move";
+                                    event.dataTransfer.setData("text/plain", item.id);
+                                    const transparent = transparentDragImageRef.current;
+                                    if (transparent) {
+                                      event.dataTransfer.setDragImage(transparent, 0, 0);
+                                    }
+                                    setChipDragPreview({
+                                      label: formatBlockLabel(item),
+                                      className,
+                                      style,
+                                      x: event.clientX - pointerOffsetX,
+                                      y: event.clientY - pointerOffsetY,
+                                      offsetX: pointerOffsetX,
+                                      offsetY: pointerOffsetY,
+                                    });
+                                    setActiveDragId(item.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    if (item.kind !== "prealloc") {
+                                      setChipDragPreview(null);
+                                      setActiveDragId(null);
+                                    }
+                                  }}
+                                  onDrag={(event) => {
+                                    if (event.clientX <= 0 && event.clientY <= 0) {
+                                      return;
+                                    }
+                                    setChipDragPreview((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            x: event.clientX - prev.offsetX,
+                                            y: event.clientY - prev.offsetY,
+                                          }
+                                        : prev,
+                                    );
+                                  }}
+                                  onClick={() => {
+                                    if (item.kind !== "team" || !item.teamId) {
+                                      return;
+                                    }
+                                    setSelectedTeamId((prev) => (prev === item.teamId ? null : item.teamId));
+                                  }}
+                                  style={style}
+                                >
+                                  {formatBlockLabel(item)}
+                                </span>
+                              );
+                            })()
                           ))}
                           {(allocationMatrix[bench.id]?.[day] ?? []).length === 0 &&
                           (preallocationMatrix[bench.id]?.[day] ?? []).length === 0 ? (
@@ -3291,6 +3416,18 @@ export default function Page() {
             </table>
           </section>
         </>
+      ) : null}
+      {chipDragPreview ? (
+        <span
+          className={`${chipDragPreview.className} chip-drag-preview`.trim()}
+          style={{
+            ...(chipDragPreview.style ?? {}),
+            left: chipDragPreview.x,
+            top: chipDragPreview.y,
+          }}
+        >
+          {chipDragPreview.label}
+        </span>
       ) : null}
     </main>
   );
