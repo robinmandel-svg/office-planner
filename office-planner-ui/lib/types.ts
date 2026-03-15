@@ -30,6 +30,8 @@ export type Team = {
   targetDays: number;
   preferredDays: Day[];
   contiguousDaysRequired: boolean;
+  anchorBenchId?: string;
+  anchorSeats?: number;
 };
 
 export type FlexPolicy = {
@@ -42,6 +44,8 @@ export type TeamProximityRequest = {
   teamA: string;
   teamB: string;
   strength: number;
+  strict?: boolean;
+  days?: Day[];
 };
 
 export type PlannerInput = {
@@ -98,6 +102,7 @@ export type PlanDiagnostics = {
   fairnessMinRatio: number;
   totalFulfilledDays: number;
   contiguityPenalty: number;
+  strictProximityRelaxations: string[];
   teamDiagnostics: TeamDiagnostics[];
   dayDiagnostics: DayDiagnostics[];
 };

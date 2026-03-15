@@ -151,6 +151,20 @@ type ChipDragPreview = {
   offsetY: number;
 };
 
+type ProximityRequestStatus = {
+  status: "met" | "unmet" | "na";
+  unmetDays: Day[];
+};
+
+type ValidationIssue = {
+  id: string;
+  scope: "step0" | "step1" | "step2" | "step3" | "step4" | "step5" | "step6";
+  level: "error" | "warning";
+  message: string;
+  fixCode?: string;
+  fixLabel?: string;
+};
+
 const initialBenches: Bench[] = [
   { id: "B1", capacity: 10, order: 1, floorId: "F1", layout: { x: 10, y: 20, w: 8, h: 5 } },
   { id: "B2", capacity: 10, order: 2, floorId: "F1", layout: { x: 22, y: 20, w: 8, h: 5 } },
@@ -161,10 +175,10 @@ const initialBenches: Bench[] = [
 const initialFloors: FloorPlan[] = [{ id: "F1", name: "Floor 1" }];
 
 const initialTeams: Team[] = [
-  { id: "Engineering", size: 12, targetDays: 3, preferredDays: ["Tue", "Wed", "Thu"], contiguousDaysRequired: false },
-  { id: "Sales", size: 8, targetDays: 3, preferredDays: ["Tue", "Thu"], contiguousDaysRequired: false },
-  { id: "Design", size: 6, targetDays: 2, preferredDays: ["Mon", "Wed"], contiguousDaysRequired: false },
-  { id: "Finance", size: 5, targetDays: 2, preferredDays: ["Mon", "Fri"], contiguousDaysRequired: false },
+  { id: "Engineering", size: 12, targetDays: 3, preferredDays: ["Tue", "Wed", "Thu"], contiguousDaysRequired: false, anchorBenchId: "B1", anchorSeats: 2 },
+  { id: "Sales", size: 8, targetDays: 3, preferredDays: ["Tue", "Thu"], contiguousDaysRequired: false, anchorBenchId: "", anchorSeats: 0 },
+  { id: "Design", size: 6, targetDays: 2, preferredDays: ["Mon", "Wed"], contiguousDaysRequired: false, anchorBenchId: "", anchorSeats: 0 },
+  { id: "Finance", size: 5, targetDays: 2, preferredDays: ["Mon", "Fri"], contiguousDaysRequired: false, anchorBenchId: "B3", anchorSeats: 1 },
 ];
 
 const initialPreallocations: PreallocationDraft[] = [
@@ -174,7 +188,7 @@ const initialPreallocations: PreallocationDraft[] = [
 ];
 
 const initialProximityRequests: TeamProximityRequest[] = [
-  { teamA: "Engineering", teamB: "Design", strength: 3 },
+  { teamA: "Engineering", teamB: "Design", strength: 3, strict: false, days: [...DAYS] },
 ];
 
 const AUTOSAVE_KEY = "office-planner-ui.autosave.v1";
@@ -242,6 +256,14 @@ function parseBoolean(value: string | undefined): boolean {
   return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "y";
 }
 
+function isTextEntryElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toUpperCase();
+  return target.isContentEditable || tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -262,6 +284,47 @@ function normalizeRotation(value: number): number {
 
 function angleFromCenter(clientX: number, clientY: number, centerX: number, centerY: number): number {
   return (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
+}
+
+function benchCenterPoint(bench: Bench, fallbackIndex: number): { x: number; y: number; floorId: string } {
+  if (bench.layout) {
+    return {
+      x: bench.layout.x + bench.layout.w / 2,
+      y: bench.layout.y + bench.layout.h / 2,
+      floorId: bench.floorId ?? "F1",
+    };
+  }
+  return {
+    x: fallbackIndex * 10,
+    y: 50,
+    floorId: bench.floorId ?? "F1",
+  };
+}
+
+function benchPointDistance(
+  a: { x: number; y: number; floorId: string },
+  b: { x: number; y: number; floorId: string },
+): number {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  const base = Math.sqrt(dx * dx + dy * dy);
+  return a.floorId === b.floorId ? base : base + 250;
+}
+
+function proximityScoreFromDistance(distance: number): number {
+  if (distance <= 0.1) {
+    return 5;
+  }
+  if (distance <= 20) {
+    return 4;
+  }
+  if (distance <= 40) {
+    return 3;
+  }
+  if (distance <= 70) {
+    return 2;
+  }
+  return 1;
 }
 
 function toDayArray(value: unknown): Day[] {
@@ -298,6 +361,8 @@ function cloneTeams(source: Team[]): Team[] {
     targetDays: Number(team.targetDays),
     preferredDays: [...team.preferredDays],
     contiguousDaysRequired: !!team.contiguousDaysRequired,
+    anchorBenchId: team.anchorBenchId ? String(team.anchorBenchId) : "",
+    anchorSeats: Math.max(0, Number(team.anchorSeats) || 0),
   }));
 }
 
@@ -323,6 +388,8 @@ function cloneProximity(source: TeamProximityRequest[]): TeamProximityRequest[] 
     teamA: item.teamA,
     teamB: item.teamB,
     strength: Number(item.strength),
+    strict: !!item.strict,
+    days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
   }));
 }
 
@@ -607,6 +674,7 @@ export default function Page() {
   const [baselineAllocations, setBaselineAllocations] = useState<AllocationBlock[]>([]);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [selectedAllocationId, setSelectedAllocationId] = useState<string | null>(null);
   const [importFeedback, setImportFeedback] = useState<{ benches: string; teams: string; preallocations: string; config: string }>({
     benches: "",
     teams: "",
@@ -710,6 +778,7 @@ export default function Page() {
     setLayoutDayView("off");
     setSelectedBenchId(null);
     setSelectedTeamId(null);
+    setSelectedAllocationId(null);
     setManualError(null);
     setResult(null);
     setManualAllocations([]);
@@ -742,6 +811,7 @@ export default function Page() {
       setManualAllocations([]);
       setBaselineAllocations([]);
       setSelectedTeamId(null);
+      setSelectedAllocationId(null);
       return;
     }
     const teamBlocks: AllocationBlock[] = result.primary.allocations.map((item, index) => ({
@@ -763,8 +833,18 @@ export default function Page() {
     setManualAllocations(allBlocks);
     setBaselineAllocations(allBlocks);
     setSelectedTeamId(null);
+    setSelectedAllocationId(null);
     setManualError(null);
   }, [result]);
+
+  useEffect(() => {
+    if (!selectedAllocationId) {
+      return;
+    }
+    if (!manualAllocations.some((item) => item.id === selectedAllocationId)) {
+      setSelectedAllocationId(null);
+    }
+  }, [manualAllocations, selectedAllocationId]);
 
   useEffect(() => {
     if (!floors.some((floor) => floor.id === selectedFloorId) && floors.length > 0) {
@@ -1088,6 +1168,19 @@ export default function Page() {
       });
   }, [manualAllocations, cellCapacity]);
 
+  const availableSeatsByCell = useMemo(() => {
+    const usedByCell: Record<string, number> = {};
+    for (const item of manualAllocations) {
+      const key = `${item.benchId}-${item.day}`;
+      usedByCell[key] = (usedByCell[key] ?? 0) + item.seats;
+    }
+    const available: Record<string, number> = {};
+    for (const [key, capacity] of Object.entries(cellCapacity)) {
+      available[key] = Math.max(0, capacity - (usedByCell[key] ?? 0));
+    }
+    return available;
+  }, [cellCapacity, manualAllocations]);
+
   const movedBlocksCount = useMemo(() => {
     if (!baselineAllocations.length || !manualAllocations.length) {
       return 0;
@@ -1169,6 +1262,376 @@ export default function Page() {
   }, [result]);
 
   const teamRequirementMap = useMemo(() => new Map(teams.map((team) => [team.id, team])), [teams]);
+  const assignedDaysByTeam = useMemo(() => {
+    const map = new Map<string, Set<Day>>();
+    for (const item of manualAllocations) {
+      if (item.kind !== "team" || !item.teamId) {
+        continue;
+      }
+      const days = map.get(item.teamId) ?? new Set<Day>();
+      days.add(item.day);
+      map.set(item.teamId, days);
+    }
+    return map;
+  }, [manualAllocations]);
+  const proximityRequestStatuses = useMemo(() => {
+    const defaultStatus: ProximityRequestStatus = { status: "na", unmetDays: [] };
+    if (!result) {
+      return proximityRequests.map(() => defaultStatus);
+    }
+
+    const benchPointById = new Map<string, { x: number; y: number; floorId: string }>();
+    benchesByOrder.forEach((bench, index) => {
+      benchPointById.set(bench.id, benchCenterPoint(bench, index));
+    });
+
+    const teamBenchesByDay: Record<Day, Map<string, Set<string>>> = {
+      Mon: new Map(),
+      Tue: new Map(),
+      Wed: new Map(),
+      Thu: new Map(),
+      Fri: new Map(),
+    };
+    for (const item of manualAllocations) {
+      if (item.kind !== "team" || !item.teamId) {
+        continue;
+      }
+      const byTeam = teamBenchesByDay[item.day];
+      const benchSet = byTeam.get(item.teamId) ?? new Set<string>();
+      benchSet.add(item.benchId);
+      byTeam.set(item.teamId, benchSet);
+    }
+
+    return proximityRequests.map((request) => {
+      const enforcedDays = toDayArray(request.days && request.days.length > 0 ? request.days : DAYS);
+      const unmetDays: Day[] = [];
+      let checkedDays = 0;
+      for (const day of enforcedDays) {
+        const aBenches = teamBenchesByDay[day].get(request.teamA);
+        const bBenches = teamBenchesByDay[day].get(request.teamB);
+        if (!aBenches || !bBenches || aBenches.size === 0 || bBenches.size === 0) {
+          continue;
+        }
+        checkedDays += 1;
+
+        let minDistance = Number.POSITIVE_INFINITY;
+        for (const aBenchId of aBenches) {
+          for (const bBenchId of bBenches) {
+            if (aBenchId === bBenchId) {
+              minDistance = 0;
+              continue;
+            }
+            const pointA = benchPointById.get(aBenchId);
+            const pointB = benchPointById.get(bBenchId);
+            if (!pointA || !pointB) {
+              continue;
+            }
+            minDistance = Math.min(minDistance, benchPointDistance(pointA, pointB));
+          }
+        }
+        const dayScore =
+          minDistance === Number.POSITIVE_INFINITY ? 1 : proximityScoreFromDistance(minDistance);
+        const requiredScore = request.strict ? 4 : Math.max(1, Math.min(5, Number(request.strength) || 1));
+        if (dayScore < requiredScore) {
+          unmetDays.push(day);
+        }
+      }
+
+      if (checkedDays === 0) {
+        return { status: "na", unmetDays } as ProximityRequestStatus;
+      }
+      return {
+        status: unmetDays.length > 0 ? "unmet" : "met",
+        unmetDays,
+      } as ProximityRequestStatus;
+    });
+  }, [benchesByOrder, manualAllocations, proximityRequests, result]);
+
+  const validationIssues = useMemo(() => {
+    const issues: ValidationIssue[] = [];
+    const benchIds = benches.map((bench) => bench.id.trim()).filter((id) => id.length > 0);
+    const benchIdSet = new Set(benchIds);
+    const teamIds = teams.map((team) => team.id.trim()).filter((id) => id.length > 0);
+    const teamIdSet = new Set(teamIds);
+
+    const benchEmptyIdCount = benches.filter((bench) => !bench.id.trim()).length;
+    const benchInvalidCapacityCount = benches.filter((bench) => Number(bench.capacity) <= 0).length;
+    const benchMissingLayoutCount = benches.filter((bench) => !bench.layout).length;
+    const benchDuplicateCount = benchIds.length - new Set(benchIds).size;
+    if (benches.length === 0) {
+      issues.push({
+        id: "bench-none",
+        scope: "step1",
+        level: "error",
+        message: "No benches defined.",
+        fixCode: "add_default_bench",
+        fixLabel: "Add default bench",
+      });
+    }
+    if (benchEmptyIdCount > 0) {
+      issues.push({
+        id: "bench-empty-id",
+        scope: "step1",
+        level: "error",
+        message: `${benchEmptyIdCount} bench row(s) have empty IDs.`,
+        fixCode: "normalize_benches",
+        fixLabel: "Auto-fix bench IDs",
+      });
+    }
+    if (benchDuplicateCount > 0) {
+      issues.push({
+        id: "bench-duplicate-id",
+        scope: "step1",
+        level: "error",
+        message: `${benchDuplicateCount} duplicate bench ID(s).`,
+        fixCode: "normalize_benches",
+        fixLabel: "Make bench IDs unique",
+      });
+    }
+    if (benchInvalidCapacityCount > 0) {
+      issues.push({
+        id: "bench-capacity",
+        scope: "step1",
+        level: "error",
+        message: `${benchInvalidCapacityCount} bench row(s) have capacity <= 0.`,
+        fixCode: "normalize_benches",
+        fixLabel: "Set invalid capacities to 1",
+      });
+    }
+    if (benchMissingLayoutCount > 0) {
+      issues.push({
+        id: "bench-missing-layout",
+        scope: "step2",
+        level: "warning",
+        message: `${benchMissingLayoutCount} bench row(s) have no layout box yet.`,
+        fixCode: "add_default_layouts",
+        fixLabel: "Create default layout boxes",
+      });
+    }
+    if (floors.every((floor) => !floor.imageDataUrl)) {
+      issues.push({
+        id: "layout-no-image",
+        scope: "step2",
+        level: "warning",
+        message: "No floor image uploaded yet.",
+      });
+    }
+
+    const teamEmptyIdCount = teams.filter((team) => !team.id.trim()).length;
+    const teamInvalidSizeCount = teams.filter((team) => Number(team.size) <= 0).length;
+    const teamInvalidTargetCount = teams.filter((team) => Number(team.targetDays) < 0 || Number(team.targetDays) > 5).length;
+    const teamDuplicateCount = teamIds.length - new Set(teamIds).size;
+    const teamInvalidAnchorCount = teams.filter((team) => {
+      const anchorBenchId = (team.anchorBenchId ?? "").trim();
+      return anchorBenchId.length > 0 && !benchIdSet.has(anchorBenchId);
+    }).length;
+    const teamInvalidAnchorSeatsCount = teams.filter((team) => {
+      const anchorBenchId = (team.anchorBenchId ?? "").trim();
+      const anchorSeats = Number(team.anchorSeats ?? 0);
+      if (!anchorBenchId) {
+        return anchorSeats > 0;
+      }
+      return anchorSeats < 1 || anchorSeats > Number(team.size);
+    }).length;
+    if (teams.length === 0) {
+      issues.push({
+        id: "team-none",
+        scope: "step3",
+        level: "error",
+        message: "No teams defined.",
+      });
+    }
+    if (teamEmptyIdCount > 0) {
+      issues.push({
+        id: "team-empty-id",
+        scope: "step3",
+        level: "error",
+        message: `${teamEmptyIdCount} team row(s) have empty IDs.`,
+        fixCode: "normalize_teams",
+        fixLabel: "Auto-fix team rows",
+      });
+    }
+    if (teamDuplicateCount > 0) {
+      issues.push({
+        id: "team-duplicate-id",
+        scope: "step3",
+        level: "error",
+        message: `${teamDuplicateCount} duplicate team ID(s).`,
+        fixCode: "normalize_teams",
+        fixLabel: "Make team IDs unique",
+      });
+    }
+    if (teamInvalidSizeCount > 0 || teamInvalidTargetCount > 0 || teamInvalidAnchorCount > 0 || teamInvalidAnchorSeatsCount > 0) {
+      issues.push({
+        id: "team-invalid-values",
+        scope: "step3",
+        level: "error",
+        message:
+          `${teamInvalidSizeCount} invalid size, ${teamInvalidTargetCount} invalid target, ` +
+          `${teamInvalidAnchorCount} invalid anchors, ${teamInvalidAnchorSeatsCount} invalid anchor seats.`,
+        fixCode: "normalize_teams",
+        fixLabel: "Normalize team values",
+      });
+    }
+
+    const proximityInvalidTeamCount = proximityRequests.filter(
+      (request) =>
+        !request.teamA.trim() ||
+        !request.teamB.trim() ||
+        request.teamA.trim() === request.teamB.trim() ||
+        !teamIdSet.has(request.teamA.trim()) ||
+        !teamIdSet.has(request.teamB.trim()),
+    ).length;
+    const proximityInvalidDaysCount = proximityRequests.filter(
+      (request) => toDayArray(request.days).length === 0,
+    ).length;
+    if (proximityInvalidTeamCount > 0) {
+      issues.push({
+        id: "prox-invalid-team",
+        scope: "step4",
+        level: "error",
+        message: `${proximityInvalidTeamCount} proximity request(s) have invalid teams.`,
+        fixCode: "remove_invalid_proximity",
+        fixLabel: "Remove invalid requests",
+      });
+    }
+    if (proximityInvalidDaysCount > 0) {
+      issues.push({
+        id: "prox-empty-days",
+        scope: "step4",
+        level: "warning",
+        message: `${proximityInvalidDaysCount} proximity request(s) have no enforced days.`,
+        fixCode: "fill_proximity_days",
+        fixLabel: "Set all weekdays",
+      });
+    }
+
+    const preallocUnknownBenchCount = preallocations.filter((item) => !benchIdSet.has(item.benchId.trim())).length;
+    const preallocNoDaysCount = preallocations.filter((item) => toDayArray(item.days).length === 0).length;
+    const preallocInvalidSeatsCount = preallocations.filter((item) => Number(item.seats) < 0).length;
+    if (preallocUnknownBenchCount > 0 || preallocNoDaysCount > 0 || preallocInvalidSeatsCount > 0) {
+      issues.push({
+        id: "prealloc-invalid",
+        scope: "step5",
+        level: "warning",
+        message:
+          `${preallocUnknownBenchCount} unknown bench, ${preallocNoDaysCount} empty days, ` +
+          `${preallocInvalidSeatsCount} negative seats in pre-allocations.`,
+        fixCode: "normalize_preallocations",
+        fixLabel: "Normalize pre-allocations",
+      });
+    }
+
+    const policyFlexInvalid = Number(flexDefault) < 0 || Number(flexDefault) > 100;
+    const policyBenchStabilityInvalid = Number(benchStabilityWeight) < 0 || Number(benchStabilityWeight) > 10;
+    if (policyFlexInvalid || policyBenchStabilityInvalid) {
+      issues.push({
+        id: "policy-invalid",
+        scope: "step0",
+        level: "error",
+        message: "Policy has out-of-range values (flex must be 0-100, stability 0-10).",
+        fixCode: "normalize_policy",
+        fixLabel: "Normalize policy",
+      });
+    }
+
+    const strictUnmetCount = proximityRequestStatuses.filter((status) => status.status === "unmet").length;
+    if (strictUnmetCount > 0) {
+      issues.push({
+        id: "strict-unmet",
+        scope: "step6",
+        level: "warning",
+        message: `${strictUnmetCount} proximity request(s) currently unmet in the plan.`,
+        fixCode: "disable_unmet_strict",
+        fixLabel: "Disable strict on unmet",
+      });
+    }
+
+    if (manualUsageWarnings.length > 0) {
+      issues.push({
+        id: "manual-over-capacity",
+        scope: "step6",
+        level: "error",
+        message: `${manualUsageWarnings.length} manual cell(s) exceed capacity.`,
+        fixCode: "reset_manual_moves",
+        fixLabel: "Reset manual moves",
+      });
+    }
+
+    if (!result) {
+      issues.push({
+        id: "plan-not-generated",
+        scope: "step6",
+        level: "warning",
+        message: "Plan not generated yet.",
+      });
+    }
+
+    return issues;
+  }, [
+    benchStabilityWeight,
+    benches,
+    flexDefault,
+    floors,
+    manualUsageWarnings,
+    preallocations,
+    proximityRequestStatuses,
+    proximityRequests,
+    result,
+    teams,
+  ]);
+
+  const validationByScope = useMemo(() => {
+    const grouped: Record<ValidationIssue["scope"], ValidationIssue[]> = {
+      step0: [],
+      step1: [],
+      step2: [],
+      step3: [],
+      step4: [],
+      step5: [],
+      step6: [],
+    };
+    validationIssues.forEach((issue) => {
+      grouped[issue.scope].push(issue);
+    });
+    return grouped;
+  }, [validationIssues]);
+
+  const stepHealth = useMemo(() => {
+    const step2Done =
+      floors.length > 0 &&
+      benches.length > 0 &&
+      benches.every((bench) => !!bench.layout && Number(bench.layout.w) > 0 && Number(bench.layout.h) > 0);
+    return [
+      { id: "step0", label: "0 Import & Policy", done: validationByScope.step0.filter((i) => i.level === "error").length === 0 },
+      { id: "step1", label: "1 Benches", done: benches.length > 0 && validationByScope.step1.filter((i) => i.level === "error").length === 0 },
+      { id: "step2", label: "2 Layout", done: step2Done },
+      { id: "step3", label: "3 Teams", done: teams.length > 0 && validationByScope.step3.filter((i) => i.level === "error").length === 0 },
+      { id: "step4", label: "4 Proximity", done: validationByScope.step4.filter((i) => i.level === "error").length === 0 },
+      { id: "step5", label: "5 Prealloc", done: validationByScope.step5.filter((i) => i.level === "error").length === 0 },
+      { id: "step6", label: "6 Generate", done: !!result && validationByScope.step6.filter((i) => i.level === "error").length === 0 },
+    ];
+  }, [benches, floors.length, result, teams.length, validationByScope]);
+
+  const planHealth = useMemo(() => {
+    const errorCount = validationIssues.filter((issue) => issue.level === "error").length + (error ? 1 : 0);
+    const warningCount = validationIssues.filter((issue) => issue.level === "warning").length;
+    const completion = stepHealth.filter((item) => item.done).length;
+    const level = errorCount > 0 ? "error" : warningCount > 0 ? "warning" : "ok";
+    const title =
+      errorCount > 0
+        ? "Data issues detected"
+        : !result
+          ? "Ready to generate"
+          : warningCount > 0
+            ? "Plan generated with warnings"
+            : "Plan healthy";
+    return { errorCount, warningCount, completion, total: stepHealth.length, level, title };
+  }, [error, result, stepHealth, validationIssues]);
+  const actionableValidationIssues = useMemo(
+    () => validationIssues.filter((issue) => issue.id !== "plan-not-generated"),
+    [validationIssues],
+  );
   const isLayoutPlanViewActive = !!result && layoutDayView !== "off";
   const layoutDaySummary = useMemo(() => {
     const summary = new Map<
@@ -1262,7 +1725,22 @@ export default function Page() {
   }
 
   function updateTeam(index: number, patch: Partial<Team>) {
-    setTeams((prev) => prev.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
+    setTeams((prev) =>
+      prev.map((item, idx) => {
+        if (idx !== index) {
+          return item;
+        }
+        const next = { ...item, ...patch };
+        const size = Math.max(0, Number(next.size) || 0);
+        const hasAnchorBench = Boolean((next.anchorBenchId ?? "").trim());
+        const normalizedAnchorSeats = hasAnchorBench ? Math.max(0, Number(next.anchorSeats) || 0) : 0;
+        return {
+          ...next,
+          size,
+          anchorSeats: Math.min(size, normalizedAnchorSeats),
+        };
+      }),
+    );
   }
 
   function updatePreallocation(index: number, patch: Partial<PreallocationDraft>) {
@@ -1270,7 +1748,164 @@ export default function Page() {
   }
 
   function updateProximityRequest(index: number, patch: Partial<TeamProximityRequest>) {
-    setProximityRequests((prev) => prev.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
+    setProximityRequests((prev) =>
+      prev.map((item, idx) => {
+        if (idx !== index) {
+          return item;
+        }
+        const next = { ...item, ...patch };
+        const normalizedDays = toDayArray(next.days && next.days.length > 0 ? next.days : [DAYS[0]]);
+        return {
+          ...next,
+          strength: Math.max(1, Math.min(5, Number(next.strength) || 1)),
+          strict: !!next.strict,
+          days: normalizedDays,
+        };
+      }),
+    );
+  }
+
+  function applyValidationFix(fixCode: string) {
+    if (fixCode === "add_default_bench") {
+      setBenches((prev) =>
+        prev.length > 0
+          ? prev
+          : [
+              {
+                id: "B1",
+                capacity: 8,
+                order: 1,
+                floorId: selectedFloor?.id ?? "F1",
+                layout: defaultLayoutForIndex(0),
+              },
+            ],
+      );
+      return;
+    }
+
+    if (fixCode === "normalize_benches") {
+      setBenches((prev) => {
+        const used = new Set<string>();
+        return prev.map((bench, index) => {
+          const fallback = `B${index + 1}`;
+          const base = bench.id.trim() || fallback;
+          let id = base;
+          let suffix = 2;
+          while (used.has(id)) {
+            id = `${base}_${suffix}`;
+            suffix += 1;
+          }
+          used.add(id);
+          return {
+            ...bench,
+            id,
+            capacity: Math.max(1, Number(bench.capacity) || 1),
+            order: Number.isFinite(Number(bench.order)) ? Number(bench.order) : index + 1,
+          };
+        });
+      });
+      return;
+    }
+
+    if (fixCode === "add_default_layouts") {
+      setBenches((prev) =>
+        prev.map((bench, index) => ({
+          ...bench,
+          layout: bench.layout ?? defaultLayoutForIndex(index),
+        })),
+      );
+      return;
+    }
+
+    if (fixCode === "normalize_teams") {
+      const validBenchIds = new Set(benches.map((bench) => bench.id.trim()).filter((id) => id.length > 0));
+      setTeams((prev) => {
+        const used = new Set<string>();
+        return prev.map((team, index) => {
+          const fallback = `Team${index + 1}`;
+          const base = team.id.trim() || fallback;
+          let id = base;
+          let suffix = 2;
+          while (used.has(id)) {
+            id = `${base}_${suffix}`;
+            suffix += 1;
+          }
+          used.add(id);
+          const size = Math.max(1, Number(team.size) || 1);
+          const targetDays = clamp(Number(team.targetDays) || 0, 0, 5);
+          const anchorBenchId = (team.anchorBenchId ?? "").trim();
+          const hasValidAnchor = anchorBenchId.length > 0 && validBenchIds.has(anchorBenchId);
+          const normalizedAnchorSeats = hasValidAnchor ? Math.max(1, Number(team.anchorSeats) || 1) : 0;
+          return {
+            ...team,
+            id,
+            size,
+            targetDays,
+            preferredDays: toDayArray(team.preferredDays),
+            anchorBenchId: hasValidAnchor ? anchorBenchId : "",
+            anchorSeats: Math.min(size, normalizedAnchorSeats),
+          };
+        });
+      });
+      return;
+    }
+
+    if (fixCode === "remove_invalid_proximity") {
+      const validTeamIds = new Set(teams.map((team) => team.id.trim()).filter((id) => id.length > 0));
+      setProximityRequests((prev) =>
+        prev.filter((request) => {
+          const teamA = request.teamA.trim();
+          const teamB = request.teamB.trim();
+          return teamA && teamB && teamA !== teamB && validTeamIds.has(teamA) && validTeamIds.has(teamB);
+        }),
+      );
+      return;
+    }
+
+    if (fixCode === "fill_proximity_days") {
+      setProximityRequests((prev) =>
+        prev.map((request) => ({
+          ...request,
+          days: toDayArray(request.days).length > 0 ? toDayArray(request.days) : [...DAYS],
+        })),
+      );
+      return;
+    }
+
+    if (fixCode === "normalize_preallocations") {
+      const validBenchIds = new Set(benches.map((bench) => bench.id.trim()).filter((id) => id.length > 0));
+      setPreallocations((prev) =>
+        prev
+          .filter((item) => validBenchIds.has(item.benchId.trim()))
+          .map((item) => ({
+            ...item,
+            benchId: item.benchId.trim(),
+            seats: Math.max(0, Number(item.seats) || 0),
+            days: toDayArray(item.days).length > 0 ? toDayArray(item.days) : [DAYS[0]],
+          })),
+      );
+      return;
+    }
+
+    if (fixCode === "normalize_policy") {
+      setFlexDefault((prev) => clamp(Number(prev) || 0, 0, 100));
+      setBenchStabilityWeight((prev) => clamp(Number(prev) || 0, 0, 10));
+      return;
+    }
+
+    if (fixCode === "disable_unmet_strict") {
+      setProximityRequests((prev) =>
+        prev.map((request, index) =>
+          proximityRequestStatuses[index]?.status === "unmet" ? { ...request, strict: false } : request,
+        ),
+      );
+      return;
+    }
+
+    if (fixCode === "reset_manual_moves") {
+      setManualAllocations(baselineAllocations);
+      setManualError(null);
+    }
   }
 
   function updateSelectedBenchRotation(value: number) {
@@ -1599,6 +2234,8 @@ export default function Page() {
           targetDays: Math.max(0, Math.min(5, Number(team.targetDays) || 0)),
           preferredDays: toDayArray(team.preferredDays),
           contiguousDaysRequired: typeof team.contiguousDaysRequired === "boolean" ? team.contiguousDaysRequired : false,
+          anchorBenchId: String(team.anchorBenchId ?? "").trim(),
+          anchorSeats: Math.max(0, Number(team.anchorSeats) || 0),
         };
       })
       .filter((team): team is Team => team !== null);
@@ -1644,10 +2281,13 @@ export default function Page() {
         if (!teamA || !teamB || teamA === teamB) {
           return null;
         }
+        const parsedDays = toDayArray(req.days);
         return {
           teamA,
           teamB,
           strength: Math.max(1, Math.min(5, Number(req.strength) || 1)),
+          strict: !!req.strict,
+          days: parsedDays.length > 0 ? parsedDays : [...DAYS],
         };
       })
       .filter((item): item is TeamProximityRequest => item !== null);
@@ -1939,9 +2579,11 @@ export default function Page() {
       const targetIdx = headers.indexOf("target_days");
       const prefIdx = headers.indexOf("preferred_days");
       const contiguousIdx = headers.indexOf("contiguous_days_required");
+      const anchorBenchIdx = headers.indexOf("anchor_bench_id");
+      const anchorSeatsIdx = headers.indexOf("anchor_seats");
       if (idIdx < 0 || sizeIdx < 0 || targetIdx < 0 || prefIdx < 0) {
         setError(
-          "Teams CSV must include id, size, target_days, preferred_days headers (optional: contiguous_days_required).",
+          "Teams CSV must include id, size, target_days, preferred_days headers (optional: contiguous_days_required, anchor_bench_id, anchor_seats).",
         );
         setImportFeedback((prev) => ({ ...prev, teams: `Failed: ${file.name} (invalid headers)` }));
         return;
@@ -1953,6 +2595,8 @@ export default function Page() {
         targetDays: Number(row[targetIdx]),
         preferredDays: parsePreferredDays(row[prefIdx] ?? ""),
         contiguousDaysRequired: contiguousIdx >= 0 ? parseBoolean(row[contiguousIdx]) : false,
+        anchorBenchId: anchorBenchIdx >= 0 ? String(row[anchorBenchIdx] ?? "").trim() : "",
+        anchorSeats: anchorSeatsIdx >= 0 ? Math.max(0, Number(row[anchorSeatsIdx]) || 0) : 0,
       }));
 
       setTeams(parsed.filter((team) => team.id));
@@ -2043,6 +2687,8 @@ export default function Page() {
         targetDays: Number(team.targetDays),
         preferredDays: team.preferredDays,
         contiguousDaysRequired: !!team.contiguousDaysRequired,
+        anchorBenchId: (team.anchorBenchId ?? "").trim(),
+        anchorSeats: Math.max(0, Number(team.anchorSeats) || 0),
       })),
       preallocations: preallocationItems.map((item) => ({
         benchId: item.benchId.trim(),
@@ -2062,6 +2708,8 @@ export default function Page() {
           teamA: item.teamA.trim(),
           teamB: item.teamB.trim(),
           strength: Math.max(1, Math.min(5, Number(item.strength) || 1)),
+          strict: !!item.strict,
+          days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
         })),
       benchStabilityWeight: Math.max(0, Math.min(10, Number(benchStabilityWeight) || 0)),
     };
@@ -2108,6 +2756,7 @@ export default function Page() {
     if (!moving) {
       return;
     }
+    setSelectedAllocationId(blockId);
     if (moving.benchId === benchId && moving.day === day) {
       return;
     }
@@ -2168,6 +2817,70 @@ export default function Page() {
     );
     setManualError(null);
   }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isTextEntryElement(event.target)) {
+        return;
+      }
+      if (event.key === "Escape") {
+        if (activeDragId || chipDragPreview || layoutDrag) {
+          event.preventDefault();
+          setActiveDragId(null);
+          setChipDragPreview(null);
+          setLayoutDrag(null);
+          return;
+        }
+        if (selectedAllocationId) {
+          event.preventDefault();
+          setSelectedAllocationId(null);
+        }
+        return;
+      }
+      if (!selectedAllocationId) {
+        return;
+      }
+
+      const selected = manualAllocations.find((item) => item.id === selectedAllocationId);
+      if (!selected || selected.kind === "prealloc") {
+        return;
+      }
+      const dayIndexCurrent = DAYS.indexOf(selected.day);
+      const benchIndexCurrent = benchesByOrder.findIndex((bench) => bench.id === selected.benchId);
+      if (dayIndexCurrent < 0 || benchIndexCurrent < 0) {
+        return;
+      }
+
+      let nextDayIndex = dayIndexCurrent;
+      let nextBenchIndex = benchIndexCurrent;
+      switch (event.key) {
+        case "ArrowLeft":
+          nextDayIndex = dayIndexCurrent - 1;
+          break;
+        case "ArrowRight":
+          nextDayIndex = dayIndexCurrent + 1;
+          break;
+        case "ArrowUp":
+          nextBenchIndex = benchIndexCurrent - 1;
+          break;
+        case "ArrowDown":
+          nextBenchIndex = benchIndexCurrent + 1;
+          break;
+        default:
+          return;
+      }
+      if (nextDayIndex < 0 || nextDayIndex >= DAYS.length || nextBenchIndex < 0 || nextBenchIndex >= benchesByOrder.length) {
+        return;
+      }
+      event.preventDefault();
+      moveAllocation(selected.id, benchesByOrder[nextBenchIndex].id, DAYS[nextDayIndex]);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeDragId, benchesByOrder, chipDragPreview, layoutDrag, manualAllocations, selectedAllocationId]);
 
   function exportBenchPlanCsv() {
     const rows: string[][] = [["bench", ...DAYS]];
@@ -2258,6 +2971,51 @@ export default function Page() {
           days, then compares fairness-first vs efficiency-first outcomes.
         </p>
       </section>
+
+      <section className={`plan-health-bar is-${planHealth.level}`}>
+        <div className="plan-health-main">
+          <strong>{planHealth.title}</strong>
+          <span>
+            Steps complete: {planHealth.completion}/{planHealth.total}
+          </span>
+          <span>Errors: {planHealth.errorCount}</span>
+          <span>Warnings: {planHealth.warningCount}</span>
+        </div>
+        <div className="plan-health-steps">
+          {stepHealth.map((step) => (
+            <span
+              key={step.id}
+              className={`plan-health-step ${step.done ? "is-done" : "is-pending"}`}
+              title={step.done ? "Completed" : "Needs attention"}
+            >
+              {step.label}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      {(actionableValidationIssues.length > 0 || error) ? (
+        <section className="panel validation-panel">
+          <div className="validation-head">
+            <h2>Validation & Quick Fixes</h2>
+            <p className="subtle">Resolve issues before generating or sharing. One-click fixes apply safe defaults.</p>
+          </div>
+          {error ? <p className="error">{error}</p> : null}
+          <ul className="validation-list">
+            {actionableValidationIssues.map((issue) => (
+                <li key={issue.id} className={`validation-item is-${issue.level}`}>
+                  <span className={`validation-dot is-${issue.level}`} />
+                  <span className="validation-message">{issue.message}</span>
+                  {issue.fixCode && issue.fixLabel ? (
+                    <button type="button" onClick={() => applyValidationFix(issue.fixCode)}>
+                      {issue.fixLabel}
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="panel scenario-panel">
         <div className="scenario-head">
@@ -2757,16 +3515,18 @@ export default function Page() {
 
       <CollapsibleSection
         title="Step 3: Teams"
-        description="Set team size, target days, contiguous requirement, and preferred days."
+        description="Set team size, target days, contiguous requirement, preferred days, and optional anchored bench seats."
         defaultOpen={false}
       >
-        <table>
+        <table className="teams-input-table">
           <thead>
             <tr>
               <th>Team</th>
-              <th>Size</th>
+              <th className="col-size">Size</th>
               <th>Target days</th>
               <th>Contiguous required</th>
+              <th>Anchor bench</th>
+              <th>Anchor seats</th>
               <th>Preferred days</th>
               <th />
             </tr>
@@ -2777,8 +3537,13 @@ export default function Page() {
                 <td>
                   <input value={team.id} onChange={(e) => updateTeam(index, { id: e.target.value })} />
                 </td>
-                <td>
-                  <input type="number" value={team.size} onChange={(e) => updateTeam(index, { size: Number(e.target.value) })} />
+                <td className="col-size">
+                  <input
+                    className="input-size"
+                    type="number"
+                    value={team.size}
+                    onChange={(e) => updateTeam(index, { size: Number(e.target.value) })}
+                  />
                 </td>
                 <td>
                   <input
@@ -2800,12 +3565,59 @@ export default function Page() {
                   </label>
                 </td>
                 <td>
+                  <select
+                    value={team.anchorBenchId ?? ""}
+                    onChange={(e) => {
+                      const nextAnchorBenchId = e.target.value;
+                      if (!nextAnchorBenchId) {
+                        updateTeam(index, { anchorBenchId: "", anchorSeats: 0 });
+                        return;
+                      }
+                      const currentAnchorSeats = Math.max(0, Number(team.anchorSeats) || 0);
+                      updateTeam(index, {
+                        anchorBenchId: nextAnchorBenchId,
+                        anchorSeats: currentAnchorSeats > 0 ? currentAnchorSeats : 1,
+                      });
+                    }}
+                  >
+                    <option value="">None</option>
+                    {benchesByOrder.map((bench) => (
+                      <option key={`team-anchor-${index}-${bench.id}`} value={bench.id}>
+                        {bench.id}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    min={team.anchorBenchId ? 1 : 0}
+                    max={team.size}
+                    value={team.anchorSeats ?? 0}
+                    disabled={!team.anchorBenchId}
+                    onChange={(e) => updateTeam(index, { anchorSeats: Math.max(0, Number(e.target.value) || 0) })}
+                  />
+                </td>
+                <td>
                   <div className="days-inline">
                     {DAYS.map((day) => (
-                      <label key={`team-${index}-${day}`}>
+                      (() => {
+                        const requested = team.preferredDays.includes(day);
+                        const assigned = (assignedDaysByTeam.get(team.id) ?? new Set<Day>()).has(day);
+                        const dayStatusClass = result
+                          ? requested
+                            ? assigned
+                              ? "team-day-match"
+                              : "team-day-request-only"
+                            : assigned
+                              ? "team-day-assigned-only"
+                              : "team-day-none"
+                          : "";
+                        return (
+                      <label key={`team-${index}-${day}`} className={dayStatusClass}>
                         <input
                           type="checkbox"
-                          checked={team.preferredDays.includes(day)}
+                          checked={requested}
                           onChange={(e) => {
                             if (e.target.checked) {
                               updateTeam(index, { preferredDays: [...team.preferredDays, day] });
@@ -2816,6 +3628,8 @@ export default function Page() {
                         />
                         {day}
                       </label>
+                        );
+                      })()
                     ))}
                   </div>
                 </td>
@@ -2836,6 +3650,8 @@ export default function Page() {
                 targetDays: 2,
                 preferredDays: ["Tue", "Thu"],
                 contiguousDaysRequired: false,
+                anchorBenchId: "",
+                anchorSeats: 0,
               },
             ])
           }
@@ -2846,21 +3662,39 @@ export default function Page() {
 
       <CollapsibleSection
         title="Step 4: Team Proximity Requests"
-        description="Optional: request teams to sit near each other when they attend on the same day."
+        description="Optional: request teams to sit near each other on explicit days. Strict mode treats pairs as one placement group. Red dot = request currently unmet."
         defaultOpen={false}
       >
         <table>
           <thead>
             <tr>
+              <th>Status</th>
               <th>Team A</th>
               <th>Team B</th>
               <th>Strength (1-5)</th>
+              <th>Strict as one group</th>
+              <th>Enforced days</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {proximityRequests.map((item, index) => (
+            {proximityRequests.map((item, index) => {
+              const status = proximityRequestStatuses[index] ?? { status: "na", unmetDays: [] as Day[] };
+              const statusTitle =
+                status.status === "unmet"
+                  ? `Unmet on ${status.unmetDays.join(", ")}`
+                  : status.status === "met"
+                    ? "Request met on active overlap days"
+                    : "Not evaluated yet (or teams do not overlap on selected days)";
+              return (
               <tr key={`prox-${index}`}>
+                <td>
+                  <span
+                    className={`prox-status-dot prox-status-${status.status}`}
+                    title={statusTitle}
+                    aria-label={statusTitle}
+                  />
+                </td>
                 <td>
                   <select
                     value={item.teamA}
@@ -2903,10 +3737,41 @@ export default function Page() {
                   />
                 </td>
                 <td>
+                  <label className="single-check">
+                    <input
+                      type="checkbox"
+                      checked={!!item.strict}
+                      onChange={(event) => updateProximityRequest(index, { strict: event.target.checked })}
+                    />
+                    Yes
+                  </label>
+                </td>
+                <td>
+                  <div className="days-inline">
+                    {DAYS.map((day) => (
+                      <label key={`prox-${index}-${day}`}>
+                        <input
+                          type="checkbox"
+                          checked={(item.days ?? []).includes(day)}
+                          onChange={(event) => {
+                            const currentDays = toDayArray(item.days && item.days.length > 0 ? item.days : DAYS);
+                            const nextDays = event.target.checked
+                              ? [...currentDays, day]
+                              : currentDays.filter((value) => value !== day);
+                            updateProximityRequest(index, { days: toDayArray(nextDays) });
+                          }}
+                        />
+                        {day}
+                      </label>
+                    ))}
+                  </div>
+                </td>
+                <td>
                   <button onClick={() => setProximityRequests((prev) => prev.filter((_, i) => i !== index))}>Delete</button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         <button
@@ -2917,6 +3782,8 @@ export default function Page() {
                 teamA: teamOptions[0] ?? "",
                 teamB: teamOptions[1] ?? teamOptions[0] ?? "",
                 strength: 3,
+                strict: false,
+                days: [...DAYS],
               },
             ])
           }
@@ -3025,6 +3892,7 @@ export default function Page() {
               <h3>Manual Adjustments</h3>
               <p className="subtle">Drag allocation chips across cells to fine-tune the plan.</p>
               <p className="subtle">If a cell is full, drop on a specific chip to swap allocations.</p>
+              <p className="subtle">Click a chip then use Arrow keys to move it. Press Esc to cancel drag or clear selection.</p>
               <p className="metric-row">Moved chips: {movedBlocksCount}</p>
               <button onClick={() => setManualAllocations(baselineAllocations)}>Reset manual moves</button>
               {manualError ? <p className="error">{manualError}</p> : null}
@@ -3055,162 +3923,182 @@ export default function Page() {
             {result.primary.diagnostics.relaxedApplied ? (
               <p className="warning">Exact targets were infeasible. Auto-relax was applied and unmet demand is shown below.</p>
             ) : null}
-            <table>
-              <thead>
-                <tr>
-                  <th>Bench (Seats)</th>
-                  {DAYS.map((day) => (
-                    <th key={day}>{day}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {benchesByOrder.map((bench) => (
-                  <tr key={bench.id}>
-                    <td>
-                      <strong>{bench.id}</strong> ({bench.capacity})
-                    </td>
+            {result.primary.diagnostics.strictProximityRelaxations.length > 0 ? (
+              <p className="warning">
+                Strict proximity auto-relaxed for: {result.primary.diagnostics.strictProximityRelaxations.join(" | ")}.
+              </p>
+            ) : null}
+            <div className="plan-table-wrap is-compact">
+              <table className="plan-table">
+                <thead>
+                  <tr>
+                    <th>Bench (Seats)</th>
                     {DAYS.map((day) => (
-                      <td
-                        key={`${bench.id}-${day}`}
-                        className={activeDragId ? "drop-target" : undefined}
-                        onDragOver={(event) => {
-                          event.preventDefault();
-                          if (!activeDragId) {
-                            return;
-                          }
-                          setChipDragPreview((prev) =>
-                            prev
-                              ? {
-                                  ...prev,
-                                  x: event.clientX - prev.offsetX,
-                                  y: event.clientY - prev.offsetY,
-                                }
-                              : prev,
-                          );
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          const blockId = event.dataTransfer.getData("text/plain");
-                          const target = event.target as HTMLElement;
-                          const swapChip = target.closest<HTMLElement>("[data-swap-block-id]");
-                          const swapWithBlockId = swapChip?.dataset.swapBlockId;
-                          moveAllocation(blockId, bench.id, day, swapWithBlockId);
-                          setChipDragPreview(null);
-                          setActiveDragId(null);
-                        }}
-                      >
-                        <div className="chip-stack">
-                          {(preallocationMatrix[bench.id]?.[day] ?? []).map((item) => (
-                            <span key={item.id} className="alloc-chip alloc-chip-prealloc">
-                              {formatBlockLabel(item)}
-                            </span>
-                          ))}
-                          {(allocationMatrix[bench.id]?.[day] ?? []).map((item) => (
-                            (() => {
-                              const className = [
-                                "alloc-chip",
-                                item.kind === "flex" ? "alloc-chip-flex" : "",
-                                item.kind === "team" && selectedTeamId
-                                  ? item.teamId === selectedTeamId
-                                    ? "alloc-chip-team-selected"
-                                    : "alloc-chip-muted"
-                                  : "",
-                                item.kind !== "team" && selectedTeamId ? "alloc-chip-muted" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ");
-                              const style =
-                                item.kind === "team"
-                                  ? teamChipStyle(
-                                      teamColorMap[item.teamId ?? ""] ??
-                                        TEAM_BASE_COLORS[hashTeam(item.teamId ?? "team") % TEAM_BASE_COLORS.length],
-                                    )
-                                  : undefined;
-                              return (
-                                <span
-                                  key={item.id}
-                                  className={className}
-                                  draggable={item.kind !== "prealloc"}
-                                  data-swap-block-id={item.id}
-                                  onDragStart={(event) => {
-                                    if (item.kind === "prealloc") {
-                                      return;
-                                    }
-                                    const chipRect = event.currentTarget.getBoundingClientRect();
-                                    const pointerOffsetX = Math.max(
-                                      0,
-                                      Math.min(chipRect.width - 1, event.clientX - chipRect.left),
-                                    );
-                                    const pointerOffsetY = Math.max(
-                                      0,
-                                      Math.min(chipRect.height - 1, event.clientY - chipRect.top),
-                                    );
-                                    event.dataTransfer.effectAllowed = "move";
-                                    event.dataTransfer.setData("text/plain", item.id);
-                                    const transparent = transparentDragImageRef.current;
-                                    if (transparent) {
-                                      event.dataTransfer.setDragImage(transparent, 0, 0);
-                                    }
-                                    setChipDragPreview({
-                                      label: formatBlockLabel(item),
-                                      className,
-                                      style,
-                                      x: event.clientX - pointerOffsetX,
-                                      y: event.clientY - pointerOffsetY,
-                                      offsetX: pointerOffsetX,
-                                      offsetY: pointerOffsetY,
-                                    });
-                                    setActiveDragId(item.id);
-                                  }}
-                                  onDragEnd={() => {
-                                    if (item.kind !== "prealloc") {
-                                      setChipDragPreview(null);
-                                      setActiveDragId(null);
-                                    }
-                                  }}
-                                  onDrag={(event) => {
-                                    if (event.clientX <= 0 && event.clientY <= 0) {
-                                      return;
-                                    }
-                                    setChipDragPreview((prev) =>
-                                      prev
-                                        ? {
-                                            ...prev,
-                                            x: event.clientX - prev.offsetX,
-                                            y: event.clientY - prev.offsetY,
-                                          }
-                                        : prev,
-                                    );
-                                  }}
-                                  onClick={() => {
-                                    if (item.kind !== "team" || !item.teamId) {
-                                      return;
-                                    }
-                                    setSelectedTeamId((prev) => (prev === item.teamId ? null : item.teamId));
-                                  }}
-                                  style={style}
-                                >
-                                  {formatBlockLabel(item)}
-                                </span>
-                              );
-                            })()
-                          ))}
-                          {(allocationMatrix[bench.id]?.[day] ?? []).length === 0 &&
-                          (preallocationMatrix[bench.id]?.[day] ?? []).length === 0 ? (
-                            <span className="empty-cell">-</span>
-                          ) : null}
-                        </div>
-                      </td>
+                      <th key={day}>{day}</th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {benchesByOrder.map((bench) => (
+                    <tr key={bench.id}>
+                      <td>
+                        <strong>{bench.id}</strong> ({bench.capacity})
+                      </td>
+                      {DAYS.map((day) => {
+                        const cellKey = `${bench.id}-${day}`;
+                        const availableSeats = availableSeatsByCell[cellKey] ?? 0;
+                        const dayAllocations = allocationMatrix[bench.id]?.[day] ?? [];
+                        const dayPreallocations = preallocationMatrix[bench.id]?.[day] ?? [];
+                        return (
+                          <td
+                            key={cellKey}
+                            className={activeDragId ? "drop-target" : undefined}
+                            onDragOver={(event) => {
+                              event.preventDefault();
+                              if (!activeDragId) {
+                                return;
+                              }
+                              setChipDragPreview((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      x: event.clientX - prev.offsetX,
+                                      y: event.clientY - prev.offsetY,
+                                    }
+                                  : prev,
+                              );
+                            }}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              const blockId = event.dataTransfer.getData("text/plain");
+                              const target = event.target as HTMLElement;
+                              const swapChip = target.closest<HTMLElement>("[data-swap-block-id]");
+                              const swapWithBlockId = swapChip?.dataset.swapBlockId;
+                              moveAllocation(blockId, bench.id, day, swapWithBlockId);
+                              setChipDragPreview(null);
+                              setActiveDragId(null);
+                              setSelectedAllocationId(blockId || null);
+                            }}
+                          >
+                            <div className="chip-stack">
+                              {dayPreallocations.map((item) => (
+                                <span key={item.id} className="alloc-chip alloc-chip-prealloc">
+                                  {formatBlockLabel(item)}
+                                </span>
+                              ))}
+                              {dayAllocations.map((item) => (
+                                (() => {
+                                  const className = [
+                                    "alloc-chip",
+                                    item.kind === "flex" ? "alloc-chip-flex" : "",
+                                    item.id === selectedAllocationId ? "alloc-chip-selected" : "",
+                                    item.kind === "team" && selectedTeamId
+                                      ? item.teamId === selectedTeamId
+                                        ? "alloc-chip-team-selected"
+                                        : "alloc-chip-muted"
+                                      : "",
+                                    item.kind !== "team" && selectedTeamId ? "alloc-chip-muted" : "",
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ");
+                                  const style =
+                                    item.kind === "team"
+                                      ? teamChipStyle(
+                                          teamColorMap[item.teamId ?? ""] ??
+                                            TEAM_BASE_COLORS[hashTeam(item.teamId ?? "team") % TEAM_BASE_COLORS.length],
+                                        )
+                                      : undefined;
+                                  return (
+                                    <span
+                                      key={item.id}
+                                      className={className}
+                                      draggable={item.kind !== "prealloc"}
+                                      data-swap-block-id={item.id}
+                                      onDragStart={(event) => {
+                                        if (item.kind === "prealloc") {
+                                          return;
+                                        }
+                                        const chipRect = event.currentTarget.getBoundingClientRect();
+                                        const pointerOffsetX = Math.max(
+                                          0,
+                                          Math.min(chipRect.width - 1, event.clientX - chipRect.left),
+                                        );
+                                        const pointerOffsetY = Math.max(
+                                          0,
+                                          Math.min(chipRect.height - 1, event.clientY - chipRect.top),
+                                        );
+                                        event.dataTransfer.effectAllowed = "move";
+                                        event.dataTransfer.setData("text/plain", item.id);
+                                        const transparent = transparentDragImageRef.current;
+                                        if (transparent) {
+                                          event.dataTransfer.setDragImage(transparent, 0, 0);
+                                        }
+                                        setChipDragPreview({
+                                          label: formatBlockLabel(item),
+                                          className,
+                                          style,
+                                          x: event.clientX - pointerOffsetX,
+                                          y: event.clientY - pointerOffsetY,
+                                          offsetX: pointerOffsetX,
+                                          offsetY: pointerOffsetY,
+                                        });
+                                        setSelectedAllocationId(item.id);
+                                        setActiveDragId(item.id);
+                                      }}
+                                      onDragEnd={() => {
+                                        if (item.kind !== "prealloc") {
+                                          setChipDragPreview(null);
+                                          setActiveDragId(null);
+                                        }
+                                      }}
+                                      onDrag={(event) => {
+                                        if (event.clientX <= 0 && event.clientY <= 0) {
+                                          return;
+                                        }
+                                        setChipDragPreview((prev) =>
+                                          prev
+                                            ? {
+                                                ...prev,
+                                                x: event.clientX - prev.offsetX,
+                                                y: event.clientY - prev.offsetY,
+                                              }
+                                            : prev,
+                                        );
+                                      }}
+                                      onClick={() => {
+                                        setSelectedAllocationId(item.id);
+                                        if (item.kind !== "team" || !item.teamId) {
+                                          return;
+                                        }
+                                        setSelectedTeamId((prev) => (prev === item.teamId ? null : item.teamId));
+                                      }}
+                                      style={style}
+                                    >
+                                      {formatBlockLabel(item)}
+                                    </span>
+                                  );
+                                })()
+                              ))}
+                              {availableSeats > 0 ? (
+                                <span className="alloc-chip alloc-chip-flex alloc-chip-seat-availability">
+                                  FLEX ({availableSeats})
+                                </span>
+                              ) : null}
+                              {dayAllocations.length === 0 && dayPreallocations.length === 0 && availableSeats <= 0 ? (
+                                <span className="empty-cell">-</span>
+                              ) : null}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </CollapsibleSection>
 
           <CollapsibleSection
-            className="grid-two"
             title="Outcome Diagnostics"
             description="Fulfillment, fairness impact, and key KPI tables."
             defaultOpen={false}
@@ -3218,6 +4106,12 @@ export default function Page() {
             <div>
               <h3>Team Outcomes</h3>
               <p className="subtle">Fulfillment, unmet demand, and Monday/Friday rule.</p>
+              <p className="subtle">
+                Day colors: <span className="team-day-chip team-day-match">requested + assigned</span>{" "}
+                <span className="team-day-chip team-day-request-only">requested only</span>{" "}
+                <span className="team-day-chip team-day-assigned-only">assigned only</span>{" "}
+                <span className="team-day-chip team-day-none">none</span>
+              </p>
               <table>
                 <thead>
                   <tr>
@@ -3230,10 +4124,14 @@ export default function Page() {
                     <th>Contiguous req</th>
                     <th>Contiguous met</th>
                     <th>Mon/Fri</th>
+                    <th>Days (Req vs Assigned)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.primary.diagnostics.teamDiagnostics.map((row) => (
+                  {result.primary.diagnostics.teamDiagnostics.map((row) => {
+                    const requestedDays = new Set(teamRequirementMap.get(row.teamId)?.preferredDays ?? []);
+                    const assignedDays = assignedDaysByTeam.get(row.teamId) ?? new Set<Day>();
+                    return (
                     <tr key={row.teamId}>
                       <td>{row.teamId}</td>
                       <td>{row.targetDays}</td>
@@ -3244,8 +4142,29 @@ export default function Page() {
                       <td>{teamRequirementMap.get(row.teamId)?.contiguousDaysRequired ? "Yes" : "No"}</td>
                       <td>{teamContiguousStatus.get(row.teamId) ? "Yes" : "No"}</td>
                       <td>{row.monFriSatisfied ? "Yes" : "No"}</td>
+                      <td>
+                        <div className="team-day-row">
+                          {DAYS.map((day) => {
+                            const requested = requestedDays.has(day);
+                            const assigned = assignedDays.has(day);
+                            const statusClass = requested
+                              ? assigned
+                                ? "team-day-match"
+                                : "team-day-request-only"
+                              : assigned
+                                ? "team-day-assigned-only"
+                                : "team-day-none";
+                            return (
+                              <span key={`${row.teamId}-${day}`} className={`team-day-chip ${statusClass}`}>
+                                {day}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

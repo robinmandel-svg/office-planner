@@ -16,13 +16,14 @@ import {
 } from "./types";
 
 type DayMap<T> = Record<Day, T>;
+type BenchAvailabilityByDay = Record<Day, Record<string, number>>;
 
 type AssignmentMap = Record<string, Set<Day>>;
 
 type CapacityContext = {
   totalSeats: number;
   benchesByOrder: Bench[];
-  benchAvailability: Record<Day, Record<string, number>>;
+  benchAvailability: BenchAvailabilityByDay;
   dayCapacity: DayMap<number>;
   dayPreallocated: DayMap<number>;
   dayFlex: DayMap<number>;
@@ -55,6 +56,33 @@ function dayIsMonFri(day: Day): boolean {
 
 function includesMonFri(days: Day[]): boolean {
   return days.some(dayIsMonFri);
+}
+
+function teamAnchorBenchId(team: Team): string | null {
+  const anchorBenchId = (team.anchorBenchId ?? "").trim();
+  return anchorBenchId.length > 0 ? anchorBenchId : null;
+}
+
+function teamAnchorSeats(team: Team): number {
+  const anchorBenchId = teamAnchorBenchId(team);
+  if (!anchorBenchId) {
+    return 0;
+  }
+  const rawSeats = Number(team.anchorSeats ?? 0);
+  if (!Number.isFinite(rawSeats) || rawSeats <= 0) {
+    return 0;
+  }
+  return Math.min(team.size, Math.floor(rawSeats));
+}
+
+function cloneBenchAvailability(availability: BenchAvailabilityByDay): BenchAvailabilityByDay {
+  return {
+    Mon: { ...availability.Mon },
+    Tue: { ...availability.Tue },
+    Wed: { ...availability.Wed },
+    Thu: { ...availability.Thu },
+    Fri: { ...availability.Fri },
+  };
 }
 
 function dayIndex(day: Day): number {
@@ -114,7 +142,7 @@ function buildCapacityContext(input: PlannerInput): CapacityContext {
   const totalSeats = benchesByOrder.reduce((acc, bench) => acc + bench.capacity, 0);
 
   const dayPreallocated = emptyDayMap(0);
-  const benchAvailability: Record<Day, Record<string, number>> = {
+  const benchAvailability: BenchAvailabilityByDay = {
     Mon: {},
     Tue: {},
     Wed: {},
@@ -211,6 +239,11 @@ function cloneAssignments(assignments: AssignmentMap): AssignmentMap {
 
 function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode: SolverMode): AssignmentMap | null {
   const teams = [...input.teams].sort((a, b) => {
+    const anchorLoadA = teamAnchorSeats(a) * a.targetDays;
+    const anchorLoadB = teamAnchorSeats(b) * b.targetDays;
+    if (anchorLoadA !== anchorLoadB) {
+      return anchorLoadB - anchorLoadA;
+    }
     const scoreA = a.size * a.targetDays;
     const scoreB = b.size * b.targetDays;
     return scoreB - scoreA;
@@ -221,6 +254,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
 
   type BeamState = {
     remaining: DayMap<number>;
+    anchorRemaining: BenchAvailabilityByDay;
     assignments: AssignmentMap;
     prefScore: number;
     score: number;
@@ -229,6 +263,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
   let beam: BeamState[] = [
     {
       remaining: { ...dayCap },
+      anchorRemaining: cloneBenchAvailability(capacity.benchAvailability),
       assignments: {},
       prefScore: 0,
       score: 0,
@@ -236,6 +271,8 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
   ];
 
   for (const team of teams) {
+    const anchorBenchId = teamAnchorBenchId(team);
+    const anchorSeats = teamAnchorSeats(team);
     const options = generateDayCombosExact(team);
     if (options.length === 0) {
       return null;
@@ -251,6 +288,14 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
             feasible = false;
             break;
           }
+          if (
+            anchorBenchId &&
+            anchorSeats > 0 &&
+            (state.anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats
+          ) {
+            feasible = false;
+            break;
+          }
         }
         if (!feasible) {
           continue;
@@ -261,12 +306,20 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
           remaining[day] -= team.size;
         }
 
+        const anchorRemaining =
+          anchorBenchId && anchorSeats > 0 ? cloneBenchAvailability(state.anchorRemaining) : state.anchorRemaining;
+        if (anchorBenchId && anchorSeats > 0) {
+          for (const day of option) {
+            anchorRemaining[day][anchorBenchId] -= anchorSeats;
+          }
+        }
+
         const assignments = cloneAssignments(state.assignments);
         assignments[team.id] = new Set(option);
 
         const prefScore = state.prefScore + preferredHits(option, team);
         const score = scoreExactState(remaining, dayCap, prefScore, mode);
-        nextBeam.push({ remaining, assignments, prefScore, score });
+        nextBeam.push({ remaining, anchorRemaining, assignments, prefScore, score });
       }
     }
 
@@ -294,9 +347,12 @@ function chooseDayForTeam(
   team: Team,
   assigned: Set<Day>,
   remaining: DayMap<number>,
+  anchorRemaining: BenchAvailabilityByDay,
   dayCap: DayMap<number>,
   mode: SolverMode,
 ): Day | null {
+  const anchorBenchId = teamAnchorBenchId(team);
+  const anchorSeats = teamAnchorSeats(team);
   const hasMonFri = [...assigned].some(dayIsMonFri);
   const candidates: { day: Day; score: number }[] = [];
 
@@ -305,6 +361,9 @@ function chooseDayForTeam(
       continue;
     }
     if (remaining[day] < team.size) {
+      continue;
+    }
+    if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
       continue;
     }
     const candidateDays = new Set(assigned);
@@ -346,8 +405,11 @@ function enforceMonFri(
   teams: Team[],
   assignments: AssignmentMap,
   remaining: DayMap<number>,
+  anchorRemaining: BenchAvailabilityByDay,
 ): void {
   for (const team of teams) {
+    const anchorBenchId = teamAnchorBenchId(team);
+    const anchorSeats = teamAnchorSeats(team);
     const assigned = assignments[team.id];
     if (!assigned || [...assigned].some(dayIsMonFri)) {
       continue;
@@ -361,16 +423,25 @@ function enforceMonFri(
       }
 
       if (remaining[day] >= team.size && assigned.size < team.targetDays) {
+        if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
+          continue;
+        }
         const candidateDays = new Set(assigned);
         candidateDays.add(day);
         if (contiguousCompatible(team, candidateDays)) {
           assigned.add(day);
           remaining[day] -= team.size;
+          if (anchorBenchId && anchorSeats > 0) {
+            anchorRemaining[day][anchorBenchId] -= anchorSeats;
+          }
           break;
         }
       }
 
       if (remaining[day] >= team.size) {
+        if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
+          continue;
+        }
         const dropDay = [...assigned].find((d) => !dayIsMonFri(d));
         if (!dropDay) {
           continue;
@@ -383,6 +454,10 @@ function enforceMonFri(
           remaining[dropDay] += team.size;
           assigned.add(day);
           remaining[day] -= team.size;
+          if (anchorBenchId && anchorSeats > 0) {
+            anchorRemaining[dropDay][anchorBenchId] += anchorSeats;
+            anchorRemaining[day][anchorBenchId] -= anchorSeats;
+          }
           break;
         }
       }
@@ -393,12 +468,18 @@ function enforceMonFri(
 function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode: SolverMode): AssignmentMap {
   const assignments = initAssignments(input.teams);
   const remaining: DayMap<number> = { ...capacity.dayCapacity };
+  const anchorRemaining = cloneBenchAvailability(capacity.benchAvailability);
   const maxTarget = Math.max(0, ...input.teams.map((team) => team.targetDays));
 
   for (let round = 1; round <= maxTarget; round += 1) {
     const teams = [...input.teams]
       .filter((team) => team.targetDays >= round)
       .sort((a, b) => {
+        const anchorSeatsA = teamAnchorSeats(a);
+        const anchorSeatsB = teamAnchorSeats(b);
+        if (anchorSeatsA !== anchorSeatsB) {
+          return anchorSeatsB - anchorSeatsA;
+        }
         const aRatio = assignments[a.id].size / Math.max(1, a.targetDays);
         const bRatio = assignments[b.id].size / Math.max(1, b.targetDays);
         if (mode === "fairness_first" && aRatio !== bRatio) {
@@ -415,16 +496,21 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
       if (assigned.size >= team.targetDays) {
         continue;
       }
-      const chosenDay = chooseDayForTeam(team, assigned, remaining, capacity.dayCapacity, mode);
+      const chosenDay = chooseDayForTeam(team, assigned, remaining, anchorRemaining, capacity.dayCapacity, mode);
       if (!chosenDay) {
         continue;
       }
       assigned.add(chosenDay);
       remaining[chosenDay] -= team.size;
+      const anchorBenchId = teamAnchorBenchId(team);
+      const anchorSeats = teamAnchorSeats(team);
+      if (anchorBenchId && anchorSeats > 0) {
+        anchorRemaining[chosenDay][anchorBenchId] -= anchorSeats;
+      }
     }
   }
 
-  enforceMonFri(input.teams, assignments, remaining);
+  enforceMonFri(input.teams, assignments, remaining, anchorRemaining);
   return assignments;
 }
 
@@ -567,9 +653,14 @@ function bestSpatialCluster(
 
 function buildProximityMap(
   requests: TeamProximityRequest[] | undefined,
+  day: Day,
 ): Record<string, Record<string, number>> {
   const map: Record<string, Record<string, number>> = {};
   for (const req of requests ?? []) {
+    const reqDays = req.days && req.days.length > 0 ? req.days : DAYS;
+    if (!reqDays.includes(day)) {
+      continue;
+    }
     if (!req.teamA || !req.teamB || req.teamA === req.teamB) {
       continue;
     }
@@ -586,39 +677,240 @@ function buildProximityMap(
   return map;
 }
 
+function buildStrictGroupsForDay(
+  teamsInDay: Team[],
+  requests: TeamProximityRequest[] | undefined,
+  day: Day,
+): string[][] {
+  const teamIds = teamsInDay.map((team) => team.id);
+  const present = new Set(teamIds);
+  const adjacency: Record<string, Set<string>> = {};
+  for (const teamId of teamIds) {
+    adjacency[teamId] = new Set();
+  }
+
+  for (const req of requests ?? []) {
+    if (!req.strict || !present.has(req.teamA) || !present.has(req.teamB)) {
+      continue;
+    }
+    const reqDays = req.days && req.days.length > 0 ? req.days : DAYS;
+    if (!reqDays.includes(day)) {
+      continue;
+    }
+    adjacency[req.teamA].add(req.teamB);
+    adjacency[req.teamB].add(req.teamA);
+  }
+
+  const visited = new Set<string>();
+  const groups: string[][] = [];
+  for (const teamId of teamIds) {
+    if (visited.has(teamId)) {
+      continue;
+    }
+    const stack = [teamId];
+    const component: string[] = [];
+    visited.add(teamId);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) {
+        continue;
+      }
+      component.push(current);
+      for (const neighbor of adjacency[current]) {
+        if (visited.has(neighbor)) {
+          continue;
+        }
+        visited.add(neighbor);
+        stack.push(neighbor);
+      }
+    }
+    if (component.length > 1) {
+      groups.push(component);
+    }
+  }
+
+  return groups;
+}
+
 function allocateBenches(
   input: PlannerInput,
   teams: Team[],
   assignments: AssignmentMap,
   capacity: CapacityContext,
-): { allocations: BenchAllocation[]; flexAllocations: FlexAllocation[]; contiguityPenalty: number } {
+): {
+  allocations: BenchAllocation[];
+  flexAllocations: FlexAllocation[];
+  contiguityPenalty: number;
+  strictProximityRelaxations: string[];
+} {
   const allocations: BenchAllocation[] = [];
   const flexAllocations: FlexAllocation[] = [];
   let contiguityPenalty = 0;
+  const strictProximityRelaxations: string[] = [];
   const byDay = teamsByDay(teams, assignments);
-  const proximityMap = buildProximityMap(input.proximityRequests);
   const benchStabilityWeight = Math.max(0, Math.min(10, input.benchStabilityWeight ?? 5));
   const teamBenchCenters: Record<string, BenchPoint> = {};
+  const benchById = new Map(capacity.benchesByOrder.map((bench) => [bench.id, bench]));
+  const benchPointById: Record<string, BenchPoint> = {};
+  const teamById = new Map(teams.map((team) => [team.id, team]));
+  capacity.benchesByOrder.forEach((bench, index) => {
+    benchPointById[bench.id] = benchPoint(bench, index);
+  });
+
+  function addTeamAllocation(day: Day, teamId: string, benchId: string, seats: number): void {
+    if (seats <= 0) {
+      return;
+    }
+    const existing = allocations.find((item) => item.day === day && item.teamId === teamId && item.benchId === benchId);
+    if (existing) {
+      existing.seats += seats;
+      return;
+    }
+    allocations.push({ benchId, day, teamId, seats });
+  }
 
   for (const day of DAYS) {
     const benchRemaining: Record<string, number> = { ...capacity.benchAvailability[day] };
     const teamList = byDay[day];
+    const strictGroups = buildStrictGroupsForDay(teamList, input.proximityRequests, day);
+    const proximityMap = buildProximityMap(input.proximityRequests, day);
     const dayCenters: Record<string, BenchPoint> = {};
+    const anchorReservedByTeam: Record<string, { benchId: string; seats: number }> = {};
 
+    // Reserve anchored seats first so non-anchored placements cannot consume mandatory anchor desks.
     for (const team of teamList) {
+      const anchorBenchId = teamAnchorBenchId(team);
+      const anchorSeats = teamAnchorSeats(team);
+      if (!anchorBenchId || anchorSeats <= 0) {
+        continue;
+      }
+      const available = benchRemaining[anchorBenchId] ?? 0;
+      if (available < anchorSeats) {
+        // Guardrail: keep anchored-seat requirements hard even if input drift creates an impossible state.
+        contiguityPenalty += 1000;
+        continue;
+      }
+      benchRemaining[anchorBenchId] -= anchorSeats;
+      anchorReservedByTeam[team.id] = { benchId: anchorBenchId, seats: anchorSeats };
+    }
+
+    const groupedTeamIds = new Set(strictGroups.reduce((acc, group) => [...acc, ...group], [] as string[]));
+    const units: Array<{ teamIds: string[]; strict: boolean; totalSize: number }> = [];
+    for (const group of strictGroups) {
+      const totalSize = group.reduce((acc, teamId) => acc + (teamById.get(teamId)?.size ?? 0), 0);
+      units.push({ teamIds: group, strict: true, totalSize });
+    }
+    for (const team of teamList) {
+      if (groupedTeamIds.has(team.id)) {
+        continue;
+      }
+      units.push({ teamIds: [team.id], strict: false, totalSize: team.size });
+    }
+    units.sort((a, b) => b.totalSize - a.totalSize);
+
+    function allocateUnit(unitTeams: Team[], forceSinglePlacement: boolean): boolean {
+      const startAllocLen = allocations.length;
+      const startPenalty = contiguityPenalty;
+      const benchSnapshot = forceSinglePlacement ? { ...benchRemaining } : null;
+      const dayCentersSnapshot = forceSinglePlacement ? { ...dayCenters } : null;
+      const teamBenchCentersSnapshot = forceSinglePlacement ? { ...teamBenchCenters } : null;
+
+      function rollbackAndFail(): boolean {
+        if (!forceSinglePlacement || !benchSnapshot || !dayCentersSnapshot || !teamBenchCentersSnapshot) {
+          return false;
+        }
+        allocations.length = startAllocLen;
+        contiguityPenalty = startPenalty;
+        for (const [benchId, seats] of Object.entries(benchSnapshot)) {
+          benchRemaining[benchId] = seats;
+        }
+        for (const key of Object.keys(dayCenters)) {
+          delete dayCenters[key];
+        }
+        Object.assign(dayCenters, dayCentersSnapshot);
+        for (const key of Object.keys(teamBenchCenters)) {
+          delete teamBenchCenters[key];
+        }
+        Object.assign(teamBenchCenters, teamBenchCentersSnapshot);
+        return false;
+      }
+
+      const teamSeatByBench: Record<string, Record<string, number>> = {};
+      const teamLeft: Record<string, number> = {};
+      for (const team of unitTeams) {
+        teamSeatByBench[team.id] = {};
+        const anchorBenchId = teamAnchorBenchId(team);
+        const anchorSeats = teamAnchorSeats(team);
+        const reservedAnchorSeats = anchorBenchId ? anchorReservedByTeam[team.id]?.seats ?? 0 : 0;
+        if (anchorBenchId && anchorSeats > 0 && reservedAnchorSeats < anchorSeats) {
+          return rollbackAndFail();
+        }
+
+        let left = team.size;
+        if (anchorBenchId && reservedAnchorSeats > 0) {
+          addTeamAllocation(day, team.id, anchorBenchId, reservedAnchorSeats);
+          teamSeatByBench[team.id][anchorBenchId] = reservedAnchorSeats;
+          left -= reservedAnchorSeats;
+        }
+
+        // If the team is anchored, keep as many of its remaining seats on that bench as possible.
+        if (anchorBenchId && left > 0) {
+          const anchorAvailable = benchRemaining[anchorBenchId] ?? 0;
+          if (anchorAvailable > 0) {
+            const extraAnchorSeats = Math.min(anchorAvailable, left);
+            if (extraAnchorSeats > 0) {
+              benchRemaining[anchorBenchId] -= extraAnchorSeats;
+              left -= extraAnchorSeats;
+              addTeamAllocation(day, team.id, anchorBenchId, extraAnchorSeats);
+              teamSeatByBench[team.id][anchorBenchId] =
+                (teamSeatByBench[team.id][anchorBenchId] ?? 0) + extraAnchorSeats;
+            }
+          }
+        }
+        teamLeft[team.id] = left;
+      }
+
+      function sumLeft(): number {
+        return Object.values(teamLeft).reduce((acc, value) => acc + value, 0);
+      }
+
+      function allocateSeatChunk(benchId: string, seats: number): void {
+        let leftSeats = seats;
+        while (leftSeats > 0) {
+          const nextTeamId = unitTeams
+            .map((team) => team.id)
+            .filter((teamId) => (teamLeft[teamId] ?? 0) > 0)
+            .sort((a, b) => (teamLeft[b] ?? 0) - (teamLeft[a] ?? 0))[0];
+          if (!nextTeamId) {
+            break;
+          }
+          const take = Math.min(leftSeats, teamLeft[nextTeamId]);
+          teamLeft[nextTeamId] -= take;
+          leftSeats -= take;
+          addTeamAllocation(day, nextTeamId, benchId, take);
+          teamSeatByBench[nextTeamId][benchId] = (teamSeatByBench[nextTeamId][benchId] ?? 0) + take;
+        }
+      }
+
       let preferredCenter: BenchPoint | null = null;
       let preferenceWeight = 0;
-      const partners = proximityMap[team.id] ?? {};
       const weightedCenters: Array<{ center: BenchPoint; weight: number }> = [];
-      for (const [partnerId, weight] of Object.entries(partners)) {
-        const partnerCenter = dayCenters[partnerId];
-        if (partnerCenter === undefined) {
-          continue;
+      for (const team of unitTeams) {
+        const partners = proximityMap[team.id] ?? {};
+        for (const [partnerId, weight] of Object.entries(partners)) {
+          const partnerCenter = dayCenters[partnerId];
+          if (!partnerCenter) {
+            continue;
+          }
+          weightedCenters.push({ center: partnerCenter, weight });
         }
-        weightedCenters.push({ center: partnerCenter, weight });
-      }
-      if (benchStabilityWeight > 0 && teamBenchCenters[team.id] !== undefined) {
-        weightedCenters.push({ center: teamBenchCenters[team.id], weight: benchStabilityWeight });
+        if (benchStabilityWeight > 0 && teamBenchCenters[team.id] !== undefined) {
+          weightedCenters.push({ center: teamBenchCenters[team.id], weight: benchStabilityWeight });
+        }
+        const anchorBenchId = teamAnchorBenchId(team);
+        if (anchorBenchId && benchPointById[anchorBenchId]) {
+          weightedCenters.push({ center: benchPointById[anchorBenchId], weight: 18 });
+        }
       }
       if (weightedCenters.length > 0) {
         const totalWeight = weightedCenters.reduce((acc, item) => acc + item.weight, 0);
@@ -638,39 +930,46 @@ function allocateBenches(
         preferenceWeight = Math.max(1, Math.round(totalWeight));
       }
 
-      const segment = bestSpatialCluster(
-        capacity.benchesByOrder,
-        benchRemaining,
-        team.size,
-        preferredCenter,
-        preferenceWeight * 2,
-      );
-      if (!segment) {
-        continue;
-      }
-
-      let left = team.size;
-      // Keep bench order from cluster search (nearest-to-anchor) to reduce accidental long-tail splits.
-      const orderedBenches = [...segment.benchIds];
-      for (const benchId of orderedBenches) {
-        if (left <= 0) {
-          break;
-        }
-        const bench = capacity.benchesByOrder.find((item) => item.id === benchId);
-        if (!bench) {
-          continue;
-        }
-        const available = benchRemaining[bench.id];
-        if (available <= 0) {
-          continue;
-        }
-        const seats = Math.min(available, left);
-        benchRemaining[bench.id] -= seats;
-        left -= seats;
-        allocations.push({ benchId: bench.id, day, teamId: team.id, seats });
-      }
-
+      let left = sumLeft();
       if (left > 0) {
+        const segment = bestSpatialCluster(
+          capacity.benchesByOrder,
+          benchRemaining,
+          left,
+          preferredCenter,
+          preferenceWeight * 2,
+        );
+        if (!segment && forceSinglePlacement) {
+          return rollbackAndFail();
+        }
+        if (segment) {
+          const orderedBenches = [...segment.benchIds];
+          for (const benchId of orderedBenches) {
+            if (left <= 0) {
+              break;
+            }
+            const bench = benchById.get(benchId);
+            if (!bench) {
+              continue;
+            }
+            const available = benchRemaining[bench.id];
+            if (available <= 0) {
+              continue;
+            }
+            const seats = Math.min(available, left);
+            benchRemaining[bench.id] -= seats;
+            left -= seats;
+            allocateSeatChunk(bench.id, seats);
+          }
+          contiguityPenalty += Math.round(segment.spread / 4);
+        }
+      }
+
+      left = sumLeft();
+      if (left > 0) {
+        if (forceSinglePlacement) {
+          return rollbackAndFail();
+        }
         // Fallback to non-contiguous fill when a contiguous segment under-delivers due fragmentation.
         for (const bench of capacity.benchesByOrder) {
           if (left <= 0) {
@@ -683,22 +982,68 @@ function allocateBenches(
           const seats = Math.min(available, left);
           benchRemaining[bench.id] -= seats;
           left -= seats;
-          allocations.push({ benchId: bench.id, day, teamId: team.id, seats });
+          allocateSeatChunk(bench.id, seats);
         }
         contiguityPenalty += 10;
       }
 
-      contiguityPenalty += Math.round(segment.spread / 4);
-      const segmentCenter = segment.center;
-      dayCenters[team.id] = segmentCenter;
-      teamBenchCenters[team.id] =
-        teamBenchCenters[team.id] === undefined
-          ? segmentCenter
-          : {
-              x: (teamBenchCenters[team.id].x * 2 + segmentCenter.x) / 3,
-              y: (teamBenchCenters[team.id].y * 2 + segmentCenter.y) / 3,
-              floorId: segmentCenter.floorId,
-            };
+      const aggregateByBench: Record<string, number> = {};
+      for (const team of unitTeams) {
+        for (const [benchId, seats] of Object.entries(teamSeatByBench[team.id])) {
+          aggregateByBench[benchId] = (aggregateByBench[benchId] ?? 0) + seats;
+        }
+      }
+      const seatEntries = Object.entries(aggregateByBench).filter(([, seats]) => seats > 0);
+      if (seatEntries.length === 0) {
+        return true;
+      }
+      const totalUnitSeats = seatEntries.reduce((acc, [, seats]) => acc + seats, 0);
+      const accum = seatEntries.reduce(
+        (acc, [benchId, seats]) => {
+          const point = benchPointById[benchId];
+          if (!point) {
+            return acc;
+          }
+          acc.x += point.x * seats;
+          acc.y += point.y * seats;
+          return acc;
+        },
+        { x: 0, y: 0 },
+      );
+      const firstPoint = benchPointById[seatEntries[0][0]];
+      const center: BenchPoint = {
+        x: accum.x / totalUnitSeats,
+        y: accum.y / totalUnitSeats,
+        floorId: firstPoint?.floorId ?? (teamBenchCenters[unitTeams[0].id]?.floorId ?? "F1"),
+      };
+      for (const team of unitTeams) {
+        dayCenters[team.id] = center;
+        teamBenchCenters[team.id] =
+          teamBenchCenters[team.id] === undefined
+            ? center
+            : {
+                x: (teamBenchCenters[team.id].x * 2 + center.x) / 3,
+                y: (teamBenchCenters[team.id].y * 2 + center.y) / 3,
+                floorId: center.floorId,
+              };
+      }
+      return true;
+    }
+
+    for (const unit of units) {
+      const unitTeams = unit.teamIds.map((teamId) => teamById.get(teamId)).filter((team): team is Team => !!team);
+      if (unitTeams.length === 0) {
+        continue;
+      }
+      const strictAsOne = unit.strict && unitTeams.length > 1;
+      const ok = allocateUnit(unitTeams, strictAsOne);
+      if (ok || !strictAsOne) {
+        continue;
+      }
+      strictProximityRelaxations.push(`${day}: ${unitTeams.map((team) => team.id).join(" + ")}`);
+      for (const team of unitTeams) {
+        allocateUnit([team], false);
+      }
     }
 
     let flexLeft = capacity.dayFlex[day];
@@ -715,7 +1060,7 @@ function allocateBenches(
     }
   }
 
-  return { allocations, flexAllocations, contiguityPenalty };
+  return { allocations, flexAllocations, contiguityPenalty, strictProximityRelaxations };
 }
 
 function buildTeamDiagnostics(teams: Team[], assignments: AssignmentMap): TeamDiagnostics[] {
@@ -773,7 +1118,7 @@ function toTeamSchedules(assignments: AssignmentMap): TeamSchedule[] {
 function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
   const capacity = buildCapacityContext(input);
   const assignmentResult = assignDays(input, capacity, mode);
-  const { allocations, flexAllocations, contiguityPenalty } = allocateBenches(
+  const { allocations, flexAllocations, contiguityPenalty, strictProximityRelaxations } = allocateBenches(
     input,
     input.teams,
     assignmentResult.assignments,
@@ -796,6 +1141,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
       fairnessMinRatio,
       totalFulfilledDays,
       contiguityPenalty,
+      strictProximityRelaxations,
       teamDiagnostics,
       dayDiagnostics,
     },

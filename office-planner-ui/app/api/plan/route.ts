@@ -53,6 +53,20 @@ function validateInput(raw: PlannerInput): string[] {
     if (!team.preferredDays.every((day) => isDay(day))) {
       errors.push(`Team ${team.id} has invalid preferred days.`);
     }
+    const anchorBenchId = (team.anchorBenchId ?? "").trim();
+    const anchorSeatsRaw = Number(team.anchorSeats ?? 0);
+    if (anchorBenchId) {
+      if (!raw.benches.some((bench) => bench.id === anchorBenchId)) {
+        errors.push(`Team ${team.id} anchor bench ${anchorBenchId} does not exist.`);
+      }
+      if (!Number.isFinite(anchorSeatsRaw) || anchorSeatsRaw < 1) {
+        errors.push(`Team ${team.id} anchorSeats must be >= 1 when anchorBenchId is set.`);
+      } else if (anchorSeatsRaw > team.size) {
+        errors.push(`Team ${team.id} anchorSeats cannot exceed team size.`);
+      }
+    } else if (team.anchorSeats !== undefined && Number(team.anchorSeats) > 0) {
+      errors.push(`Team ${team.id} has anchorSeats but no anchorBenchId.`);
+    }
   }
 
   for (const item of raw.preallocations) {
@@ -86,6 +100,18 @@ function validateInput(raw: PlannerInput): string[] {
       }
       if (request.strength < 1 || request.strength > 5) {
         errors.push(`Proximity request ${request.teamA}-${request.teamB} strength must be between 1 and 5.`);
+      }
+      if (request.strict !== undefined && typeof request.strict !== "boolean") {
+        errors.push(`Proximity request ${request.teamA}-${request.teamB} strict must be true or false.`);
+      }
+      if (request.days !== undefined) {
+        if (!Array.isArray(request.days) || request.days.length === 0) {
+          errors.push(`Proximity request ${request.teamA}-${request.teamB} must include at least one day.`);
+          continue;
+        }
+        if (!request.days.every((day) => isDay(day))) {
+          errors.push(`Proximity request ${request.teamA}-${request.teamB} has invalid days.`);
+        }
       }
     }
   }
