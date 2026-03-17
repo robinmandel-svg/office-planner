@@ -63,6 +63,21 @@ function teamAnchorBenchId(team: Team): string | null {
   return anchorBenchId.length > 0 ? anchorBenchId : null;
 }
 
+function teamFloorId(team: Team, benchFloorById: Map<string, string>, fallbackFloorId: string): string {
+  const explicitFloorId = (team.floorId ?? "").trim();
+  if (explicitFloorId.length > 0) {
+    return explicitFloorId;
+  }
+  const anchorBenchId = teamAnchorBenchId(team);
+  if (anchorBenchId) {
+    const anchorFloorId = benchFloorById.get(anchorBenchId);
+    if (anchorFloorId) {
+      return anchorFloorId;
+    }
+  }
+  return fallbackFloorId;
+}
+
 function teamAnchorSeats(team: Team): number {
   const anchorBenchId = teamAnchorBenchId(team);
   if (!anchorBenchId) {
@@ -1148,12 +1163,139 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
   };
 }
 
+function mergePlanResults(mode: SolverMode, plans: PlanResult[]): PlanResult {
+  const allocations = plans.flatMap((planPart) => planPart.allocations);
+  const flexAllocations = plans.flatMap((planPart) => planPart.flexAllocations);
+  const teamSchedules = plans
+    .flatMap((planPart) => planPart.teamSchedules)
+    .sort((a, b) => a.teamId.localeCompare(b.teamId));
+  const teamDiagnostics = plans
+    .flatMap((planPart) => planPart.diagnostics.teamDiagnostics)
+    .sort((a, b) => a.teamId.localeCompare(b.teamId));
+
+  const totalsByDay: Record<
+    Day,
+    {
+      allocatedSeats: number;
+      preallocatedSeats: number;
+      flexSeats: number;
+      totalSeats: number;
+    }
+  > = {
+    Mon: { allocatedSeats: 0, preallocatedSeats: 0, flexSeats: 0, totalSeats: 0 },
+    Tue: { allocatedSeats: 0, preallocatedSeats: 0, flexSeats: 0, totalSeats: 0 },
+    Wed: { allocatedSeats: 0, preallocatedSeats: 0, flexSeats: 0, totalSeats: 0 },
+    Thu: { allocatedSeats: 0, preallocatedSeats: 0, flexSeats: 0, totalSeats: 0 },
+    Fri: { allocatedSeats: 0, preallocatedSeats: 0, flexSeats: 0, totalSeats: 0 },
+  };
+
+  for (const planPart of plans) {
+    for (const row of planPart.diagnostics.dayDiagnostics) {
+      totalsByDay[row.day].allocatedSeats += row.allocatedSeats;
+      totalsByDay[row.day].preallocatedSeats += row.preallocatedSeats;
+      totalsByDay[row.day].flexSeats += row.flexSeats;
+      totalsByDay[row.day].totalSeats += row.totalSeats;
+    }
+  }
+
+  const dayDiagnostics: DayDiagnostics[] = DAYS.map((day) => {
+    const totals = totalsByDay[day];
+    return {
+      day,
+      allocatedSeats: totals.allocatedSeats,
+      preallocatedSeats: totals.preallocatedSeats,
+      flexSeats: totals.flexSeats,
+      totalSeats: totals.totalSeats,
+      occupancyPercent: totals.totalSeats > 0 ? (totals.allocatedSeats / totals.totalSeats) * 100 : 0,
+    };
+  });
+
+  const fairnessMinRatio =
+    teamDiagnostics.length > 0
+      ? teamDiagnostics.reduce((min, row) => Math.min(min, row.fulfillmentRatio), 1)
+      : 1;
+  const totalFulfilledDays = teamDiagnostics.reduce((acc, row) => acc + row.assignedDays, 0);
+
+  return {
+    allocations,
+    flexAllocations,
+    teamSchedules,
+    diagnostics: {
+      mode,
+      exactFeasible: plans.every((planPart) => planPart.diagnostics.exactFeasible),
+      relaxedApplied: plans.some((planPart) => planPart.diagnostics.relaxedApplied),
+      fairnessMinRatio,
+      totalFulfilledDays,
+      contiguityPenalty: plans.reduce((acc, planPart) => acc + planPart.diagnostics.contiguityPenalty, 0),
+      strictProximityRelaxations: plans.flatMap((planPart) => planPart.diagnostics.strictProximityRelaxations),
+      teamDiagnostics,
+      dayDiagnostics,
+    },
+  };
+}
+
 export function plan(input: PlannerInput): PlannerResponse {
   const primaryMode = input.solverMode;
   const secondaryMode: SolverMode = primaryMode === "fairness_first" ? "efficiency_first" : "fairness_first";
 
-  const primary = makePlan(input, primaryMode);
-  const comparison = makePlan(input, secondaryMode);
+  const benchFloorById = new Map<string, string>();
+  for (const bench of input.benches) {
+    benchFloorById.set(bench.id, (bench.floorId ?? "F1").trim() || "F1");
+  }
+
+  const benchFloorIds = [...new Set(input.benches.map((bench) => (bench.floorId ?? "F1").trim() || "F1"))];
+  const fallbackFloorId = benchFloorIds[0] ?? "F1";
+  const teamFloorById = new Map<string, string>();
+  for (const team of input.teams) {
+    teamFloorById.set(team.id, teamFloorId(team, benchFloorById, fallbackFloorId));
+  }
+
+  const allFloorIds = [...new Set([...benchFloorIds, ...teamFloorById.values()])];
+  const proximityByFloor: Record<string, TeamProximityRequest[]> = {};
+  for (const request of input.proximityRequests ?? []) {
+    const floorA = teamFloorById.get(request.teamA);
+    const floorB = teamFloorById.get(request.teamB);
+    if (floorA && floorB && floorA !== floorB) {
+      continue;
+    }
+    const explicitFloorId = (request.floorId ?? "").trim();
+    const inferredFloorId = explicitFloorId || floorA || floorB || fallbackFloorId;
+    if (floorA && floorA !== inferredFloorId) {
+      continue;
+    }
+    if (floorB && floorB !== inferredFloorId) {
+      continue;
+    }
+    if (!proximityByFloor[inferredFloorId]) {
+      proximityByFloor[inferredFloorId] = [];
+    }
+    proximityByFloor[inferredFloorId].push({ ...request, floorId: inferredFloorId });
+  }
+
+  const floorInputs: PlannerInput[] = allFloorIds.map((floorId) => {
+    const floorBenches = input.benches.filter((bench) => ((bench.floorId ?? "F1").trim() || "F1") === floorId);
+    const floorBenchIds = new Set(floorBenches.map((bench) => bench.id));
+    const floorTeams = input.teams
+      .filter((team) => teamFloorById.get(team.id) === floorId)
+      .map((team) => ({ ...team, floorId }));
+    const floorPreallocations = input.preallocations.filter((item) => floorBenchIds.has(item.benchId));
+    const floorProximity = proximityByFloor[floorId] ?? [];
+
+    return {
+      benches: floorBenches,
+      preallocations: floorPreallocations,
+      teams: floorTeams,
+      flexPolicy: input.flexPolicy,
+      solverMode: input.solverMode,
+      proximityRequests: floorProximity,
+      benchStabilityWeight: input.benchStabilityWeight,
+    };
+  });
+
+  const primaryByFloor = floorInputs.map((floorInput) => makePlan(floorInput, primaryMode));
+  const comparisonByFloor = floorInputs.map((floorInput) => makePlan(floorInput, secondaryMode));
+  const primary = mergePlanResults(primaryMode, primaryByFloor);
+  const comparison = mergePlanResults(secondaryMode, comparisonByFloor);
 
   return { primary, comparison };
 }

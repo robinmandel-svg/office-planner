@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   type CSSProperties,
   type ChangeEvent,
   type MouseEvent as ReactMouseEvent,
@@ -113,6 +114,8 @@ type DragState = {
   benchId?: string;
   pointerOffsetX: number;
   pointerOffsetY: number;
+  startClientX?: number;
+  startClientY?: number;
   initialOffsetX?: number;
   initialOffsetY?: number;
   initialRotation?: number;
@@ -166,32 +169,69 @@ type ValidationIssue = {
 };
 
 const initialBenches: Bench[] = [
-  { id: "B1", capacity: 10, order: 1, floorId: "F1", layout: { x: 10, y: 20, w: 8, h: 5 } },
-  { id: "B2", capacity: 10, order: 2, floorId: "F1", layout: { x: 22, y: 20, w: 8, h: 5 } },
-  { id: "B3", capacity: 10, order: 3, floorId: "F1", layout: { x: 34, y: 20, w: 8, h: 5 } },
-  { id: "B4", capacity: 8, order: 4, floorId: "F1", layout: { x: 46, y: 20, w: 8, h: 5 } },
+  { id: "F1-B1", capacity: 10, order: 1, floorId: "F1", layout: { x: 10, y: 20, w: 8, h: 5 } },
+  { id: "F1-B2", capacity: 10, order: 2, floorId: "F1", layout: { x: 22, y: 20, w: 8, h: 5 } },
+  { id: "F1-B3", capacity: 10, order: 3, floorId: "F1", layout: { x: 34, y: 20, w: 8, h: 5 } },
+  { id: "F1-B4", capacity: 8, order: 4, floorId: "F1", layout: { x: 46, y: 20, w: 8, h: 5 } },
 ];
 
 const initialFloors: FloorPlan[] = [{ id: "F1", name: "Floor 1" }];
 
 const initialTeams: Team[] = [
-  { id: "Engineering", size: 12, targetDays: 3, preferredDays: ["Tue", "Wed", "Thu"], contiguousDaysRequired: false, anchorBenchId: "B1", anchorSeats: 2 },
-  { id: "Sales", size: 8, targetDays: 3, preferredDays: ["Tue", "Thu"], contiguousDaysRequired: false, anchorBenchId: "", anchorSeats: 0 },
-  { id: "Design", size: 6, targetDays: 2, preferredDays: ["Mon", "Wed"], contiguousDaysRequired: false, anchorBenchId: "", anchorSeats: 0 },
-  { id: "Finance", size: 5, targetDays: 2, preferredDays: ["Mon", "Fri"], contiguousDaysRequired: false, anchorBenchId: "B3", anchorSeats: 1 },
+  {
+    id: "Engineering",
+    floorId: "F1",
+    size: 12,
+    targetDays: 3,
+    preferredDays: ["Tue", "Wed", "Thu"],
+    contiguousDaysRequired: false,
+    anchorBenchId: "F1-B1",
+    anchorSeats: 2,
+  },
+  {
+    id: "Sales",
+    floorId: "F1",
+    size: 8,
+    targetDays: 3,
+    preferredDays: ["Tue", "Thu"],
+    contiguousDaysRequired: false,
+    anchorBenchId: "",
+    anchorSeats: 0,
+  },
+  {
+    id: "Design",
+    floorId: "F1",
+    size: 6,
+    targetDays: 2,
+    preferredDays: ["Mon", "Wed"],
+    contiguousDaysRequired: false,
+    anchorBenchId: "",
+    anchorSeats: 0,
+  },
+  {
+    id: "Finance",
+    floorId: "F1",
+    size: 5,
+    targetDays: 2,
+    preferredDays: ["Mon", "Fri"],
+    contiguousDaysRequired: false,
+    anchorBenchId: "F1-B3",
+    anchorSeats: 1,
+  },
 ];
 
 const initialPreallocations: PreallocationDraft[] = [
-  { benchId: "B1", days: ["Mon"], seats: 2, label: "HR" },
-  { benchId: "B1", days: ["Tue"], seats: 1, label: "Assistant" },
-  { benchId: "B2", days: ["Wed", "Thu", "Fri"], seats: 1, label: "Handicap" },
+  { benchId: "F1-B1", days: ["Mon"], seats: 2, label: "HR" },
+  { benchId: "F1-B1", days: ["Tue"], seats: 1, label: "Assistant" },
+  { benchId: "F1-B2", days: ["Wed", "Thu", "Fri"], seats: 1, label: "Handicap" },
 ];
 
 const initialProximityRequests: TeamProximityRequest[] = [
-  { teamA: "Engineering", teamB: "Design", strength: 3, strict: false, days: [...DAYS] },
+  { teamA: "Engineering", teamB: "Design", floorId: "F1", strength: 3, strict: false, days: [...DAYS] },
 ];
 
 const AUTOSAVE_KEY = "office-planner-ui.autosave.v1";
+const OUTPUT_SCOPE_ALL = "__ALL_FLOORS__";
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -242,6 +282,53 @@ function parseCsv(text: string): string[][] {
 
 function dayFromString(value: string): Day | null {
   return DAYS.includes(value as Day) ? (value as Day) : null;
+}
+
+function normalizeFloorId(value: string | undefined, fallback: string): string {
+  const normalized = (value ?? "").trim();
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function resolveTeamFloorId(
+  team: Pick<Team, "floorId" | "anchorBenchId">,
+  benchFloorById: Map<string, string>,
+  fallbackFloorId: string,
+): string {
+  const explicitFloorId = normalizeFloorId(team.floorId, "");
+  if (explicitFloorId) {
+    return explicitFloorId;
+  }
+  const anchorBenchId = (team.anchorBenchId ?? "").trim();
+  if (anchorBenchId.length > 0) {
+    const anchorFloorId = benchFloorById.get(anchorBenchId);
+    if (anchorFloorId) {
+      return anchorFloorId;
+    }
+  }
+  return fallbackFloorId;
+}
+
+function ensureFloorQualifiedBenchId(rawId: string, floorId: string): string {
+  const normalizedFloorId = normalizeFloorId(floorId, "F1");
+  const compactId = rawId.trim().replace(/\s+/g, "_");
+  if (!compactId) {
+    return `${normalizedFloorId}-B`;
+  }
+  const expectedPrefix = `${normalizedFloorId}-`;
+  if (compactId.toUpperCase().startsWith(expectedPrefix.toUpperCase())) {
+    return compactId;
+  }
+  return `${expectedPrefix}${compactId}`;
+}
+
+function uniqueBenchId(candidateId: string, usedIds: Set<string>): string {
+  let nextId = candidateId;
+  let suffix = 2;
+  while (usedIds.has(nextId)) {
+    nextId = `${candidateId}_${suffix}`;
+    suffix += 1;
+  }
+  return nextId;
 }
 
 function parsePreferredDays(value: string): Day[] {
@@ -357,6 +444,7 @@ function cloneBenches(source: Bench[]): Bench[] {
 function cloneTeams(source: Team[]): Team[] {
   return source.map((team) => ({
     id: team.id,
+    floorId: team.floorId ? String(team.floorId) : undefined,
     size: Number(team.size),
     targetDays: Number(team.targetDays),
     preferredDays: [...team.preferredDays],
@@ -387,6 +475,7 @@ function cloneProximity(source: TeamProximityRequest[]): TeamProximityRequest[] 
   return source.map((item) => ({
     teamA: item.teamA,
     teamB: item.teamB,
+    floorId: item.floorId ? String(item.floorId) : undefined,
     strength: Number(item.strength),
     strict: !!item.strict,
     days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
@@ -660,10 +749,11 @@ export default function Page() {
   const [proximityRequests, setProximityRequests] = useState<TeamProximityRequest[]>(initialProximityRequests);
   const [floors, setFloors] = useState<FloorPlan[]>(initialFloors);
   const [selectedFloorId, setSelectedFloorId] = useState<string>(initialFloors[0].id);
+  const [resultFloorScopeId, setResultFloorScopeId] = useState<string>(initialFloors[0].id);
   const [layoutDrag, setLayoutDrag] = useState<DragState | null>(null);
   const [layoutView, setLayoutView] = useState<LayoutView>({ scale: 1, offsetX: 0, offsetY: 0 });
   const [layoutDayView, setLayoutDayView] = useState<LayoutDayView>("off");
-  const [showHeatmap, setShowHeatmap] = useState<boolean>(true);
+  const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
   const [selectedBenchId, setSelectedBenchId] = useState<string | null>(null);
   const [flexDefault, setFlexDefault] = useState<number>(10);
   const [benchStabilityWeight, setBenchStabilityWeight] = useState<number>(6);
@@ -690,6 +780,13 @@ export default function Page() {
   const transparentDragImageRef = useRef<HTMLImageElement | null>(null);
 
   const benchesByOrder = useMemo(() => [...benches].sort((a, b) => a.order - b.order), [benches]);
+  const benchFloorById = useMemo(() => {
+    const map = new Map<string, string>();
+    benches.forEach((bench) => {
+      map.set(bench.id, normalizeFloorId(bench.floorId, "F1"));
+    });
+    return map;
+  }, [benches]);
   const activeScenario = useMemo(
     () => scenarios.find((scenario) => scenario.id === activeScenarioId) ?? scenarios[0] ?? null,
     [activeScenarioId, scenarios],
@@ -698,16 +795,113 @@ export default function Page() {
     () => floors.find((floor) => floor.id === selectedFloorId) ?? floors[0],
     [floors, selectedFloorId],
   );
-  const benchesOnSelectedFloor = useMemo(
+  const selectedFloorKey = selectedFloor?.id ?? selectedFloorId ?? floors[0]?.id ?? "F1";
+  const floorNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    floors.forEach((floor) => {
+      map.set(floor.id, floor.name);
+    });
+    return map;
+  }, [floors]);
+  const allKnownFloorIds = useMemo(() => {
+    const ids = new Set<string>(floors.map((floor) => floor.id));
+    benches.forEach((bench) => {
+      ids.add(normalizeFloorId(bench.floorId, "F1"));
+    });
+    teams.forEach((team) => {
+      ids.add(normalizeFloorId(team.floorId, "F1"));
+    });
+    return [...ids].filter((floorId) => floorId.length > 0).sort((a, b) => a.localeCompare(b));
+  }, [benches, floors, teams]);
+  const normalizedResultFloorScopeId = useMemo(() => {
+    if (resultFloorScopeId === OUTPUT_SCOPE_ALL) {
+      return OUTPUT_SCOPE_ALL;
+    }
+    if (allKnownFloorIds.includes(resultFloorScopeId)) {
+      return resultFloorScopeId;
+    }
+    return selectedFloorKey;
+  }, [allKnownFloorIds, resultFloorScopeId, selectedFloorKey]);
+  const resultScopeFloorIds = useMemo(
     () =>
-      benchesByOrder.filter(
-        (bench) => (bench.floorId ?? selectedFloor?.id ?? "F1") === (selectedFloor?.id ?? "F1"),
-      ),
-    [benchesByOrder, selectedFloor],
+      normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL
+        ? new Set(allKnownFloorIds)
+        : new Set([normalizedResultFloorScopeId]),
+    [allKnownFloorIds, normalizedResultFloorScopeId],
+  );
+  const resultScopeLabel =
+    normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL
+      ? "All floors"
+      : floorNameById.get(normalizedResultFloorScopeId) ?? normalizedResultFloorScopeId;
+  const resultScopeFileSuffix =
+    normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? "all_floors" : normalizedResultFloorScopeId.toLowerCase();
+  const benchesOnSelectedFloor = useMemo(
+    () => benchesByOrder.filter((bench) => normalizeFloorId(bench.floorId, selectedFloorKey) === selectedFloorKey),
+    [benchesByOrder, selectedFloorKey],
+  );
+  const benchesInResultScope = useMemo(
+    () =>
+      benchesByOrder.filter((bench) => resultScopeFloorIds.has(normalizeFloorId(bench.floorId, selectedFloorKey))),
+    [benchesByOrder, resultScopeFloorIds, selectedFloorKey],
+  );
+  const benchIdsInResultScope = useMemo(() => new Set(benchesInResultScope.map((bench) => bench.id)), [benchesInResultScope]);
+  const benchesOnSelectedFloorWithIndex = useMemo(
+    () =>
+      benches
+        .map((bench, index) => ({ bench, index }))
+        .filter(({ bench }) => normalizeFloorId(bench.floorId, selectedFloorKey) === selectedFloorKey),
+    [benches, selectedFloorKey],
   );
   const selectedBenchOnFloor = useMemo(
     () => benchesOnSelectedFloor.find((bench) => bench.id === selectedBenchId) ?? null,
     [benchesOnSelectedFloor, selectedBenchId],
+  );
+  const teamFloorById = useMemo(() => {
+    const map = new Map<string, string>();
+    teams.forEach((team) => {
+      map.set(team.id, resolveTeamFloorId(team, benchFloorById, selectedFloorKey));
+    });
+    return map;
+  }, [benchFloorById, selectedFloorKey, teams]);
+  const teamsInResultScope = useMemo(
+    () =>
+      teams.filter((team) =>
+        resultScopeFloorIds.has(resolveTeamFloorId(team, benchFloorById, floors[0]?.id ?? selectedFloorKey)),
+      ),
+    [benchFloorById, floors, resultScopeFloorIds, selectedFloorKey, teams],
+  );
+  const teamIdsInResultScope = useMemo(
+    () => new Set(teamsInResultScope.map((team) => team.id)),
+    [teamsInResultScope],
+  );
+  const teamsOnSelectedFloorWithIndex = useMemo(
+    () =>
+      teams
+        .map((team, index) => ({ team, index }))
+        .filter(({ team }) => resolveTeamFloorId(team, benchFloorById, selectedFloorKey) === selectedFloorKey),
+    [benchFloorById, selectedFloorKey, teams],
+  );
+  const teamOptionsOnSelectedFloor = useMemo(
+    () =>
+      teamsOnSelectedFloorWithIndex
+        .map(({ team }) => team.id.trim())
+        .filter((teamId, index, all) => teamId.length > 0 && all.indexOf(teamId) === index)
+        .sort((a, b) => a.localeCompare(b)),
+    [teamsOnSelectedFloorWithIndex],
+  );
+  const proximityRequestsOnSelectedFloorWithIndex = useMemo(
+    () =>
+      proximityRequests
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => {
+          const requestFloorId =
+            normalizeFloorId(item.floorId, "") ||
+            teamFloorById.get(item.teamA) ||
+            teamFloorById.get(item.teamB) ||
+            selectedFloorKey;
+          return requestFloorId === selectedFloorKey;
+        }),
+    [proximityRequests, selectedFloorKey, teamFloorById],
   );
   const teamOptions = useMemo(
     () =>
@@ -729,6 +923,83 @@ export default function Page() {
     [teamOptions.length],
   );
   const preallocationItems = useMemo(() => flattenPreallocations(preallocations), [preallocations]);
+  const benchIdsOnSelectedFloor = useMemo(() => new Set(benchesOnSelectedFloor.map((bench) => bench.id)), [benchesOnSelectedFloor]);
+  const preallocationsOnSelectedFloorWithIndex = useMemo(
+    () =>
+      preallocations
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => benchIdsOnSelectedFloor.has(item.benchId)),
+    [benchIdsOnSelectedFloor, preallocations],
+  );
+  const canRemoveSelectedFloor = useMemo(() => {
+    if (!selectedFloor || floors.length <= 1) {
+      return false;
+    }
+    if (benchesOnSelectedFloorWithIndex.length > 0) {
+      return false;
+    }
+    if (teamsOnSelectedFloorWithIndex.length > 0) {
+      return false;
+    }
+    if (proximityRequestsOnSelectedFloorWithIndex.length > 0) {
+      return false;
+    }
+    if (preallocationsOnSelectedFloorWithIndex.length > 0) {
+      return false;
+    }
+    return true;
+  }, [
+    benchesOnSelectedFloorWithIndex.length,
+    floors.length,
+    preallocationsOnSelectedFloorWithIndex.length,
+    proximityRequestsOnSelectedFloorWithIndex.length,
+    selectedFloor,
+    teamsOnSelectedFloorWithIndex.length,
+  ]);
+  const floorConstraintRows = useMemo(() => {
+    const floorIds = [...new Set([...floors.map((floor) => floor.id), ...benches.map((bench) => normalizeFloorId(bench.floorId, "F1"))])]
+      .filter((floorId) => floorId.length > 0)
+      .sort((a, b) => a.localeCompare(b));
+
+    return floorIds.map((floorId) => {
+      const benchesInFloor = benchesByOrder.filter((bench) => normalizeFloorId(bench.floorId, "F1") === floorId);
+      const benchIdSet = new Set(benchesInFloor.map((bench) => bench.id));
+      const capacitySeats = benchesInFloor.reduce((acc, bench) => acc + bench.capacity, 0);
+      const preallocatedSeatDays = preallocationItems
+        .filter((item) => benchIdSet.has(item.benchId))
+        .reduce((acc, item) => acc + item.seats, 0);
+      const teamsInFloor = teams.filter((team) => resolveTeamFloorId(team, benchFloorById, floorId) === floorId);
+      const teamHeadcount = teamsInFloor.reduce((acc, team) => acc + team.size, 0);
+      const demandSeatDays = teamsInFloor.reduce((acc, team) => acc + team.size * team.targetDays, 0);
+      const anchoredTeams = teamsInFloor.filter((team) => (team.anchorBenchId ?? "").trim().length > 0).length;
+      const proximityRows = proximityRequests.filter((request) => {
+        const requestFloorId =
+          normalizeFloorId(request.floorId, "") || teamFloorById.get(request.teamA) || teamFloorById.get(request.teamB) || floorId;
+        return requestFloorId === floorId;
+      });
+      const strictProximityRows = proximityRows.filter((request) => !!request.strict).length;
+      const seatDaysCapacity = capacitySeats * DAYS.length;
+      const netSeatDays = Math.max(0, seatDaysCapacity - preallocatedSeatDays);
+      const demandRatio = netSeatDays > 0 ? (demandSeatDays / netSeatDays) * 100 : null;
+      const floorName = floors.find((floor) => floor.id === floorId)?.name ?? floorId;
+      return {
+        floorId,
+        floorName,
+        benchCount: benchesInFloor.length,
+        capacitySeats,
+        preallocatedSeatDays,
+        teamCount: teamsInFloor.length,
+        teamHeadcount,
+        demandSeatDays,
+        anchoredTeams,
+        proximityCount: proximityRows.length,
+        strictProximityRows,
+        demandRatio,
+      };
+    });
+  }, [benchFloorById, benches, benchesByOrder, floors, preallocationItems, proximityRequests, teamFloorById, teams]);
+  const selectedFloorConstraints =
+    floorConstraintRows.find((row) => row.floorId === selectedFloorKey) ?? floorConstraintRows[0] ?? null;
 
   function generateScenarioId(): string {
     return `S${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -764,11 +1035,13 @@ export default function Page() {
   );
 
   function applyScenario(scenario: PlannerScenario): void {
+    const nextSelectedFloorId = scenario.selectedFloorId || scenario.floors[0]?.id || "F1";
     setBenches(cloneBenches(scenario.benches));
     setTeams(cloneTeams(scenario.teams));
     setPreallocations(clonePreallocations(scenario.preallocations));
     setFloors(cloneFloors(scenario.floors));
-    setSelectedFloorId(scenario.selectedFloorId || scenario.floors[0]?.id || "F1");
+    setSelectedFloorId(nextSelectedFloorId);
+    setResultFloorScopeId(nextSelectedFloorId);
     setSolverMode(scenario.solverMode);
     setFlexDefault(scenario.flexDefault);
     setFlexOverrides({ ...scenario.flexOverrides });
@@ -847,10 +1120,98 @@ export default function Page() {
   }, [manualAllocations, selectedAllocationId]);
 
   useEffect(() => {
+    if (!selectedAllocationId) {
+      return;
+    }
+    if (normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL) {
+      return;
+    }
+    const selected = manualAllocations.find((item) => item.id === selectedAllocationId);
+    if (!selected) {
+      return;
+    }
+    const selectedBenchFloorId = normalizeFloorId(benchFloorById.get(selected.benchId), "F1");
+    if (selectedBenchFloorId !== selectedFloorKey) {
+      setSelectedAllocationId(null);
+    }
+  }, [benchFloorById, manualAllocations, normalizedResultFloorScopeId, selectedAllocationId, selectedFloorKey]);
+
+  useEffect(() => {
+    if (!selectedTeamId) {
+      return;
+    }
+    if (normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL) {
+      return;
+    }
+    const selectedTeamFloorId = teamFloorById.get(selectedTeamId);
+    if (!selectedTeamFloorId || selectedTeamFloorId !== selectedFloorKey) {
+      setSelectedTeamId(null);
+    }
+  }, [normalizedResultFloorScopeId, selectedFloorKey, selectedTeamId, teamFloorById]);
+
+  useEffect(() => {
     if (!floors.some((floor) => floor.id === selectedFloorId) && floors.length > 0) {
       setSelectedFloorId(floors[0].id);
     }
   }, [floors, selectedFloorId]);
+
+  useEffect(() => {
+    if (resultFloorScopeId === OUTPUT_SCOPE_ALL) {
+      return;
+    }
+    if (allKnownFloorIds.includes(resultFloorScopeId)) {
+      return;
+    }
+    setResultFloorScopeId(selectedFloorKey);
+  }, [allKnownFloorIds, resultFloorScopeId, selectedFloorKey]);
+
+  useEffect(() => {
+    if (normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL) {
+      return;
+    }
+    if (normalizedResultFloorScopeId === selectedFloorKey) {
+      return;
+    }
+    setResultFloorScopeId(selectedFloorKey);
+  }, [normalizedResultFloorScopeId, selectedFloorKey]);
+
+  useEffect(() => {
+    if (floors.length === 0) {
+      return;
+    }
+    const floorSet = new Set(floors.map((floor) => floor.id));
+    const fallbackFloorId = floors[0].id;
+    setTeams((prev) => {
+      let changed = false;
+      const next = prev.map((team) => {
+        const resolvedFloorId = resolveTeamFloorId(team, benchFloorById, fallbackFloorId);
+        const normalizedFloorId = floorSet.has(resolvedFloorId) ? resolvedFloorId : fallbackFloorId;
+        if (team.floorId === normalizedFloorId) {
+          return team;
+        }
+        changed = true;
+        return { ...team, floorId: normalizedFloorId };
+      });
+      return changed ? next : prev;
+    });
+    setProximityRequests((prev) => {
+      let changed = false;
+      const next = prev.map((request) => {
+        const resolvedFloorId =
+          normalizeFloorId(request.floorId, "") ||
+          teamFloorById.get(request.teamA) ||
+          teamFloorById.get(request.teamB) ||
+          fallbackFloorId;
+        const normalizedFloorId = floorSet.has(resolvedFloorId) ? resolvedFloorId : fallbackFloorId;
+        if (request.floorId === normalizedFloorId) {
+          return request;
+        }
+        changed = true;
+        return { ...request, floorId: normalizedFloorId };
+      });
+      return changed ? next : prev;
+    });
+  }, [benchFloorById, floors, teamFloorById]);
 
   useEffect(() => {
     if (selectedBenchId && !benches.some((bench) => bench.id === selectedBenchId)) {
@@ -1004,7 +1365,6 @@ export default function Page() {
             const baseLayout = bench.layout ?? defaultLayoutForIndex(index);
             return {
               ...bench,
-              floorId: selectedFloorId,
               layout: { ...baseLayout, rotation: nextRotation },
             };
           }),
@@ -1020,6 +1380,13 @@ export default function Page() {
       if (!point || !drag.benchId) {
         return;
       }
+      if (drag.mode === "move" && drag.startClientX !== undefined && drag.startClientY !== undefined) {
+        const jitterX = event.clientX - drag.startClientX;
+        const jitterY = event.clientY - drag.startClientY;
+        if (Math.hypot(jitterX, jitterY) < 3) {
+          return;
+        }
+      }
       setBenches((prev) =>
         prev.map((bench, index) => {
           if (bench.id !== drag.benchId) {
@@ -1033,7 +1400,6 @@ export default function Page() {
             const h = clamp(point.y - baseLayout.y, minH, 100 - baseLayout.y);
             return {
               ...bench,
-              floorId: selectedFloorId,
               layout: { ...baseLayout, w, h },
             };
           }
@@ -1041,7 +1407,6 @@ export default function Page() {
           const y = clamp(point.y - drag.pointerOffsetY, 0, 100 - baseLayout.h);
           return {
             ...bench,
-            floorId: selectedFloorId,
             layout: { ...baseLayout, x, y },
           };
         }),
@@ -1058,17 +1423,18 @@ export default function Page() {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [getCanvasPercentPoint, layoutDrag, selectedFloorId]);
+  }, [getCanvasPercentPoint, layoutDrag]);
 
   useEffect(() => {
     const canvas = layoutCanvasRef.current;
     if (!canvas) {
       return;
     }
+    const canvasElement = canvas;
     function handleWheel(event: WheelEvent) {
       event.preventDefault();
       event.stopPropagation();
-      const rect = canvas.getBoundingClientRect();
+      const rect = canvasElement.getBoundingClientRect();
       const pointerX = event.clientX - rect.left;
       const pointerY = event.clientY - rect.top;
       const factor = event.deltaY > 0 ? 0.92 : 1.08;
@@ -1083,9 +1449,9 @@ export default function Page() {
         };
       });
     }
-    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    canvasElement.addEventListener("wheel", handleWheel, { passive: false });
     return () => {
-      canvas.removeEventListener("wheel", handleWheel);
+      canvasElement.removeEventListener("wheel", handleWheel);
     };
   }, []);
 
@@ -1203,7 +1569,7 @@ export default function Page() {
     if (!result) {
       return [];
     }
-    const totalSeats = benches.reduce((acc, bench) => acc + bench.capacity, 0);
+    const totalSeats = benchesInResultScope.reduce((acc, bench) => acc + bench.capacity, 0);
     const byDay: Record<Day, { teamSeats: number; flexSeats: number }> = {
       Mon: { teamSeats: 0, flexSeats: 0 },
       Tue: { teamSeats: 0, flexSeats: 0 },
@@ -1213,6 +1579,9 @@ export default function Page() {
     };
 
     for (const item of manualAllocations) {
+      if (!benchIdsInResultScope.has(item.benchId)) {
+        continue;
+      }
       if (item.kind === "flex") {
         byDay[item.day].flexSeats += item.seats;
       } else {
@@ -1222,6 +1591,9 @@ export default function Page() {
 
     const preallocByDay: Record<Day, number> = { Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0 };
     for (const item of preallocationItems) {
+      if (!benchIdsInResultScope.has(item.benchId)) {
+        continue;
+      }
       preallocByDay[item.day] += item.seats;
     }
 
@@ -1233,7 +1605,7 @@ export default function Page() {
       totalSeats,
       occupancyPercent: totalSeats > 0 ? (byDay[day].teamSeats / totalSeats) * 100 : 0,
     }));
-  }, [result, benches, manualAllocations, preallocationItems]);
+  }, [benchIdsInResultScope, benchesInResultScope, manualAllocations, preallocationItems, result]);
 
   const teamDelta = useMemo(() => {
     if (!result) {
@@ -1251,7 +1623,31 @@ export default function Page() {
       };
     });
   }, [result]);
-
+  const teamDeltaInResultScope = useMemo(
+    () => teamDelta.filter((row) => teamIdsInResultScope.has(row.teamId)),
+    [teamDelta, teamIdsInResultScope],
+  );
+  const primaryTeamDiagnosticsInResultScope = useMemo(
+    () =>
+      result
+        ? result.primary.diagnostics.teamDiagnostics.filter((row) => teamIdsInResultScope.has(row.teamId))
+        : [],
+    [result, teamIdsInResultScope],
+  );
+  const comparisonTeamDiagnosticsInResultScope = useMemo(
+    () =>
+      result
+        ? result.comparison.diagnostics.teamDiagnostics.filter((row) => teamIdsInResultScope.has(row.teamId))
+        : [],
+    [result, teamIdsInResultScope],
+  );
+  const scopedPrimaryFairnessMin = useMemo(
+    () =>
+      primaryTeamDiagnosticsInResultScope.length > 0
+        ? Math.min(...primaryTeamDiagnosticsInResultScope.map((row) => row.fulfillmentRatio))
+        : 0,
+    [primaryTeamDiagnosticsInResultScope],
+  );
   const teamContiguousStatus = useMemo(() => {
     if (!result) {
       return new Map<string, boolean>();
@@ -1260,6 +1656,16 @@ export default function Page() {
       result.primary.teamSchedules.map((schedule) => [schedule.teamId, areDaysContiguous(schedule.days)]),
     );
   }, [result]);
+  const scopedContiguityPenalty = useMemo(
+    () =>
+      teamsInResultScope.reduce((acc, team) => {
+        if (!team.contiguousDaysRequired) {
+          return acc;
+        }
+        return teamContiguousStatus.get(team.id) ? acc : acc + 1;
+      }, 0),
+    [teamContiguousStatus, teamsInResultScope],
+  );
 
   const teamRequirementMap = useMemo(() => new Map(teams.map((team) => [team.id, team])), [teams]);
   const assignedDaysByTeam = useMemo(() => {
@@ -1304,11 +1710,23 @@ export default function Page() {
 
     return proximityRequests.map((request) => {
       const enforcedDays = toDayArray(request.days && request.days.length > 0 ? request.days : DAYS);
+      const floorA = teamFloorById.get(request.teamA);
+      const floorB = teamFloorById.get(request.teamB);
+      const requestFloorId = normalizeFloorId(request.floorId, "") || floorA || floorB || selectedFloorKey;
+      if (!floorA || !floorB || floorA !== floorB || floorA !== requestFloorId) {
+        return { status: "unmet", unmetDays: enforcedDays } as ProximityRequestStatus;
+      }
       const unmetDays: Day[] = [];
       let checkedDays = 0;
       for (const day of enforcedDays) {
-        const aBenches = teamBenchesByDay[day].get(request.teamA);
-        const bBenches = teamBenchesByDay[day].get(request.teamB);
+        const aBenchesRaw = teamBenchesByDay[day].get(request.teamA);
+        const bBenchesRaw = teamBenchesByDay[day].get(request.teamB);
+        const aBenches = new Set(
+          [...(aBenchesRaw ?? [])].filter((benchId) => normalizeFloorId(benchFloorById.get(benchId), requestFloorId) === requestFloorId),
+        );
+        const bBenches = new Set(
+          [...(bBenchesRaw ?? [])].filter((benchId) => normalizeFloorId(benchFloorById.get(benchId), requestFloorId) === requestFloorId),
+        );
         if (!aBenches || !bBenches || aBenches.size === 0 || bBenches.size === 0) {
           continue;
         }
@@ -1345,12 +1763,13 @@ export default function Page() {
         unmetDays,
       } as ProximityRequestStatus;
     });
-  }, [benchesByOrder, manualAllocations, proximityRequests, result]);
+  }, [benchesByOrder, manualAllocations, proximityRequests, result, teamFloorById, selectedFloorKey, benchFloorById]);
 
   const validationIssues = useMemo(() => {
     const issues: ValidationIssue[] = [];
     const benchIds = benches.map((bench) => bench.id.trim()).filter((id) => id.length > 0);
     const benchIdSet = new Set(benchIds);
+    const floorIdSet = new Set(floors.map((floor) => floor.id));
     const teamIds = teams.map((team) => team.id.trim()).filter((id) => id.length > 0);
     const teamIdSet = new Set(teamIds);
 
@@ -1358,6 +1777,10 @@ export default function Page() {
     const benchInvalidCapacityCount = benches.filter((bench) => Number(bench.capacity) <= 0).length;
     const benchMissingLayoutCount = benches.filter((bench) => !bench.layout).length;
     const benchDuplicateCount = benchIds.length - new Set(benchIds).size;
+    const benchFloorUnqualifiedCount = benches.filter((bench) => {
+      const floorId = normalizeFloorId(bench.floorId, "F1");
+      return !bench.id.trim().toUpperCase().startsWith(`${floorId.toUpperCase()}-`);
+    }).length;
     if (benches.length === 0) {
       issues.push({
         id: "bench-none",
@@ -1386,6 +1809,16 @@ export default function Page() {
         message: `${benchDuplicateCount} duplicate bench ID(s).`,
         fixCode: "normalize_benches",
         fixLabel: "Make bench IDs unique",
+      });
+    }
+    if (benchFloorUnqualifiedCount > 0) {
+      issues.push({
+        id: "bench-floor-prefix",
+        scope: "step1",
+        level: "warning",
+        message: `${benchFloorUnqualifiedCount} bench ID(s) do not include floor prefix (e.g. F1-B1).`,
+        fixCode: "normalize_benches",
+        fixLabel: "Apply floor-qualified IDs",
       });
     }
     if (benchInvalidCapacityCount > 0) {
@@ -1421,9 +1854,16 @@ export default function Page() {
     const teamInvalidSizeCount = teams.filter((team) => Number(team.size) <= 0).length;
     const teamInvalidTargetCount = teams.filter((team) => Number(team.targetDays) < 0 || Number(team.targetDays) > 5).length;
     const teamDuplicateCount = teamIds.length - new Set(teamIds).size;
+    const teamInvalidFloorCount = teams.filter(
+      (team) => !floorIdSet.has(resolveTeamFloorId(team, benchFloorById, selectedFloorKey)),
+    ).length;
     const teamInvalidAnchorCount = teams.filter((team) => {
       const anchorBenchId = (team.anchorBenchId ?? "").trim();
-      return anchorBenchId.length > 0 && !benchIdSet.has(anchorBenchId);
+      if (anchorBenchId.length === 0 || !benchIdSet.has(anchorBenchId)) {
+        return anchorBenchId.length > 0;
+      }
+      const teamFloorId = resolveTeamFloorId(team, benchFloorById, selectedFloorKey);
+      return benchFloorById.get(anchorBenchId) !== teamFloorId;
     }).length;
     const teamInvalidAnchorSeatsCount = teams.filter((team) => {
       const anchorBenchId = (team.anchorBenchId ?? "").trim();
@@ -1461,13 +1901,19 @@ export default function Page() {
         fixLabel: "Make team IDs unique",
       });
     }
-    if (teamInvalidSizeCount > 0 || teamInvalidTargetCount > 0 || teamInvalidAnchorCount > 0 || teamInvalidAnchorSeatsCount > 0) {
+    if (
+      teamInvalidSizeCount > 0 ||
+      teamInvalidTargetCount > 0 ||
+      teamInvalidFloorCount > 0 ||
+      teamInvalidAnchorCount > 0 ||
+      teamInvalidAnchorSeatsCount > 0
+    ) {
       issues.push({
         id: "team-invalid-values",
         scope: "step3",
         level: "error",
         message:
-          `${teamInvalidSizeCount} invalid size, ${teamInvalidTargetCount} invalid target, ` +
+          `${teamInvalidSizeCount} invalid size, ${teamInvalidTargetCount} invalid target, ${teamInvalidFloorCount} invalid floor, ` +
           `${teamInvalidAnchorCount} invalid anchors, ${teamInvalidAnchorSeatsCount} invalid anchor seats.`,
         fixCode: "normalize_teams",
         fixLabel: "Normalize team values",
@@ -1475,12 +1921,24 @@ export default function Page() {
     }
 
     const proximityInvalidTeamCount = proximityRequests.filter(
-      (request) =>
-        !request.teamA.trim() ||
-        !request.teamB.trim() ||
-        request.teamA.trim() === request.teamB.trim() ||
-        !teamIdSet.has(request.teamA.trim()) ||
-        !teamIdSet.has(request.teamB.trim()),
+      (request) => {
+        const teamA = request.teamA.trim();
+        const teamB = request.teamB.trim();
+        const floorA = teamFloorById.get(teamA);
+        const floorB = teamFloorById.get(teamB);
+        const requestFloorId = normalizeFloorId(request.floorId, "");
+        return (
+          !teamA ||
+          !teamB ||
+          teamA === teamB ||
+          !teamIdSet.has(teamA) ||
+          !teamIdSet.has(teamB) ||
+          !floorA ||
+          !floorB ||
+          floorA !== floorB ||
+          (requestFloorId.length > 0 && requestFloorId !== floorA)
+        );
+      },
     ).length;
     const proximityInvalidDaysCount = proximityRequests.filter(
       (request) => toDayArray(request.days).length === 0,
@@ -1579,6 +2037,9 @@ export default function Page() {
     proximityRequests,
     result,
     teams,
+    selectedFloorKey,
+    benchFloorById,
+    teamFloorById,
   ]);
 
   const validationByScope = useMemo(() => {
@@ -1603,7 +2064,7 @@ export default function Page() {
       benches.length > 0 &&
       benches.every((bench) => !!bench.layout && Number(bench.layout.w) > 0 && Number(bench.layout.h) > 0);
     return [
-      { id: "step0", label: "0 Import & Policy", done: validationByScope.step0.filter((i) => i.level === "error").length === 0 },
+      { id: "step0", label: "0 Data & Policy", done: validationByScope.step0.filter((i) => i.level === "error").length === 0 },
       { id: "step1", label: "1 Benches", done: benches.length > 0 && validationByScope.step1.filter((i) => i.level === "error").length === 0 },
       { id: "step2", label: "2 Layout", done: step2Done },
       { id: "step3", label: "3 Teams", done: teams.length > 0 && validationByScope.step3.filter((i) => i.level === "error").length === 0 },
@@ -1628,6 +2089,18 @@ export default function Page() {
             : "Plan healthy";
     return { errorCount, warningCount, completion, total: stepHealth.length, level, title };
   }, [error, result, stepHealth, validationIssues]);
+  const useFloorDropdown = floors.length > 5;
+  const workspaceStatus = useMemo(() => {
+    const overCapacityFloors = floorConstraintRows.filter((row) => row.demandRatio !== null && row.demandRatio > 100).length;
+    const unmetProximityRequests = proximityRequestStatuses.filter((status) => status.status === "unmet").length;
+    const strictRelaxations = result?.primary.diagnostics.strictProximityRelaxations.length ?? 0;
+    return {
+      overCapacityFloors,
+      unmetProximityRequests,
+      strictRelaxations,
+      generated: !!result,
+    };
+  }, [floorConstraintRows, proximityRequestStatuses, result]);
   const actionableValidationIssues = useMemo(
     () => validationIssues.filter((issue) => issue.id !== "plan-not-generated"),
     [validationIssues],
@@ -1724,6 +2197,37 @@ export default function Page() {
     setBenches((prev) => prev.map((item, idx) => (idx === index ? { ...item, ...patch } : item)));
   }
 
+  function normalizeBenchIdAtIndex(index: number, rawBenchId: string) {
+    const target = benches[index];
+    if (!target) {
+      return;
+    }
+    const floorId = normalizeFloorId(target.floorId, selectedFloorKey);
+    const fallbackId = `B${index + 1}`;
+    const candidate = ensureFloorQualifiedBenchId(rawBenchId.trim() || fallbackId, floorId);
+    const usedIds = new Set(benches.filter((_, rowIndex) => rowIndex !== index).map((bench) => bench.id));
+    const normalizedId = uniqueBenchId(candidate, usedIds);
+    const previousId = target.id;
+
+    setBenches((prev) => prev.map((bench, rowIndex) => (rowIndex === index ? { ...bench, id: normalizedId } : bench)));
+    if (previousId === normalizedId) {
+      return;
+    }
+    setTeams((prev) =>
+      prev.map((team) => ((team.anchorBenchId ?? "").trim() === previousId ? { ...team, anchorBenchId: normalizedId } : team)),
+    );
+    setPreallocations((prev) =>
+      prev.map((item) => (item.benchId === previousId ? { ...item, benchId: normalizedId } : item)),
+    );
+    setManualAllocations((prev) =>
+      prev.map((item) => (item.benchId === previousId ? { ...item, benchId: normalizedId } : item)),
+    );
+    setBaselineAllocations((prev) =>
+      prev.map((item) => (item.benchId === previousId ? { ...item, benchId: normalizedId } : item)),
+    );
+    setSelectedBenchId((prev) => (prev === previousId ? normalizedId : prev));
+  }
+
   function updateTeam(index: number, patch: Partial<Team>) {
     setTeams((prev) =>
       prev.map((item, idx) => {
@@ -1732,10 +2236,16 @@ export default function Page() {
         }
         const next = { ...item, ...patch };
         const size = Math.max(0, Number(next.size) || 0);
-        const hasAnchorBench = Boolean((next.anchorBenchId ?? "").trim());
+        const floorId = resolveTeamFloorId(next, benchFloorById, selectedFloorKey);
+        const anchorBenchId = (next.anchorBenchId ?? "").trim();
+        const anchorOnSameFloor = anchorBenchId.length > 0 && benchFloorById.get(anchorBenchId) === floorId;
+        const normalizedAnchorBenchId = anchorOnSameFloor ? anchorBenchId : "";
+        const hasAnchorBench = normalizedAnchorBenchId.length > 0;
         const normalizedAnchorSeats = hasAnchorBench ? Math.max(0, Number(next.anchorSeats) || 0) : 0;
         return {
           ...next,
+          floorId,
+          anchorBenchId: normalizedAnchorBenchId,
           size,
           anchorSeats: Math.min(size, normalizedAnchorSeats),
         };
@@ -1757,6 +2267,7 @@ export default function Page() {
         const normalizedDays = toDayArray(next.days && next.days.length > 0 ? next.days : [DAYS[0]]);
         return {
           ...next,
+          floorId: normalizeFloorId(next.floorId, selectedFloorKey),
           strength: Math.max(1, Math.min(5, Number(next.strength) || 1)),
           strict: !!next.strict,
           days: normalizedDays,
@@ -1767,15 +2278,16 @@ export default function Page() {
 
   function applyValidationFix(fixCode: string) {
     if (fixCode === "add_default_bench") {
+      const fallbackFloorId = selectedFloor?.id ?? selectedFloorKey;
       setBenches((prev) =>
         prev.length > 0
           ? prev
           : [
               {
-                id: "B1",
+                id: ensureFloorQualifiedBenchId("B1", fallbackFloorId),
                 capacity: 8,
                 order: 1,
-                floorId: selectedFloor?.id ?? "F1",
+                floorId: fallbackFloorId,
                 layout: defaultLayoutForIndex(0),
               },
             ],
@@ -1784,26 +2296,44 @@ export default function Page() {
     }
 
     if (fixCode === "normalize_benches") {
-      setBenches((prev) => {
-        const used = new Set<string>();
-        return prev.map((bench, index) => {
-          const fallback = `B${index + 1}`;
-          const base = bench.id.trim() || fallback;
-          let id = base;
-          let suffix = 2;
-          while (used.has(id)) {
-            id = `${base}_${suffix}`;
-            suffix += 1;
-          }
-          used.add(id);
-          return {
-            ...bench,
-            id,
-            capacity: Math.max(1, Number(bench.capacity) || 1),
-            order: Number.isFinite(Number(bench.order)) ? Number(bench.order) : index + 1,
-          };
-        });
+      const fallbackFloorId = floors[0]?.id ?? selectedFloorKey;
+      const used = new Set<string>();
+      const idRemap = new Map<string, string>();
+      const normalizedBenches = benches.map((bench, index) => {
+        const floorId = normalizeFloorId(bench.floorId, fallbackFloorId);
+        const fallback = `B${index + 1}`;
+        const base = ensureFloorQualifiedBenchId(bench.id.trim() || fallback, floorId);
+        const id = uniqueBenchId(base, used);
+        used.add(id);
+        idRemap.set(bench.id, id);
+        return {
+          ...bench,
+          id,
+          floorId,
+          capacity: Math.max(1, Number(bench.capacity) || 1),
+          order: Number.isFinite(Number(bench.order)) ? Number(bench.order) : index + 1,
+        };
       });
+      setBenches(normalizedBenches);
+      setTeams((prev) =>
+        prev.map((team) => {
+          const currentAnchor = (team.anchorBenchId ?? "").trim();
+          if (!currentAnchor || !idRemap.has(currentAnchor)) {
+            return team;
+          }
+          return { ...team, anchorBenchId: idRemap.get(currentAnchor) ?? currentAnchor };
+        }),
+      );
+      setPreallocations((prev) =>
+        prev.map((item) => (idRemap.has(item.benchId) ? { ...item, benchId: idRemap.get(item.benchId) ?? item.benchId } : item)),
+      );
+      setManualAllocations((prev) =>
+        prev.map((item) => (idRemap.has(item.benchId) ? { ...item, benchId: idRemap.get(item.benchId) ?? item.benchId } : item)),
+      );
+      setBaselineAllocations((prev) =>
+        prev.map((item) => (idRemap.has(item.benchId) ? { ...item, benchId: idRemap.get(item.benchId) ?? item.benchId } : item)),
+      );
+      setSelectedBenchId((prev) => (prev && idRemap.has(prev) ? idRemap.get(prev) ?? prev : prev));
       return;
     }
 
@@ -1819,6 +2349,7 @@ export default function Page() {
 
     if (fixCode === "normalize_teams") {
       const validBenchIds = new Set(benches.map((bench) => bench.id.trim()).filter((id) => id.length > 0));
+      const fallbackFloorId = floors[0]?.id ?? selectedFloorKey;
       setTeams((prev) => {
         const used = new Set<string>();
         return prev.map((team, index) => {
@@ -1833,12 +2364,17 @@ export default function Page() {
           used.add(id);
           const size = Math.max(1, Number(team.size) || 1);
           const targetDays = clamp(Number(team.targetDays) || 0, 0, 5);
+          const floorId = resolveTeamFloorId(team, benchFloorById, fallbackFloorId);
           const anchorBenchId = (team.anchorBenchId ?? "").trim();
-          const hasValidAnchor = anchorBenchId.length > 0 && validBenchIds.has(anchorBenchId);
+          const hasValidAnchor =
+            anchorBenchId.length > 0 &&
+            validBenchIds.has(anchorBenchId) &&
+            benchFloorById.get(anchorBenchId) === floorId;
           const normalizedAnchorSeats = hasValidAnchor ? Math.max(1, Number(team.anchorSeats) || 1) : 0;
           return {
             ...team,
             id,
+            floorId,
             size,
             targetDays,
             preferredDays: toDayArray(team.preferredDays),
@@ -1856,7 +2392,18 @@ export default function Page() {
         prev.filter((request) => {
           const teamA = request.teamA.trim();
           const teamB = request.teamB.trim();
-          return teamA && teamB && teamA !== teamB && validTeamIds.has(teamA) && validTeamIds.has(teamB);
+          const floorA = teamFloorById.get(teamA);
+          const floorB = teamFloorById.get(teamB);
+          return (
+            teamA &&
+            teamB &&
+            teamA !== teamB &&
+            validTeamIds.has(teamA) &&
+            validTeamIds.has(teamB) &&
+            !!floorA &&
+            !!floorB &&
+            floorA === floorB
+          );
         }),
       );
       return;
@@ -2016,13 +2563,59 @@ export default function Page() {
     };
   }
 
+  function benchLabelMode(layout: { w: number; h: number }, benchId: string): "inline" | "vertical" | "callout" {
+    const inlineCapacity = Math.max(4, Math.round(layout.w * 1.6));
+    const verticalCapacity = Math.max(4, Math.round(layout.h * 2.2));
+    if (benchId.length <= inlineCapacity) {
+      return "inline";
+    }
+    if (benchId.length <= verticalCapacity) {
+      return "vertical";
+    }
+    return "callout";
+  }
+
+  function updateSelectedBenchLayout(patch: Partial<{ x: number; y: number; w: number; h: number; rotation: number }>) {
+    if (!selectedBenchOnFloor) {
+      return;
+    }
+    setBenches((prev) =>
+      prev.map((bench, index) => {
+        if (bench.id !== selectedBenchOnFloor.id) {
+          return bench;
+        }
+        const baseLayout = bench.layout ?? defaultLayoutForIndex(index);
+        const proposed = {
+          x: patch.x ?? baseLayout.x,
+          y: patch.y ?? baseLayout.y,
+          w: patch.w ?? baseLayout.w,
+          h: patch.h ?? baseLayout.h,
+          rotation: patch.rotation ?? Number(baseLayout.rotation ?? 0),
+        };
+        const w = clamp(Number(proposed.w), 2, 100);
+        const h = clamp(Number(proposed.h), 1.5, 100);
+        const x = clamp(Number(proposed.x), 0, 100 - w);
+        const y = clamp(Number(proposed.y), 0, 100 - h);
+        return {
+          ...bench,
+          layout: {
+            x,
+            y,
+            w,
+            h,
+            rotation: normalizeRotation(Number(proposed.rotation)),
+          },
+        };
+      }),
+    );
+  }
+
   function ensureBenchLayout(benchId: string) {
     setBenches((prev) =>
       prev.map((bench, index) =>
         bench.id === benchId
           ? {
               ...bench,
-              floorId: bench.floorId ?? selectedFloor?.id ?? "F1",
               layout: bench.layout ?? defaultLayoutForIndex(index),
             }
           : bench,
@@ -2044,6 +2637,8 @@ export default function Page() {
       benchId: bench.id,
       pointerOffsetX: point.x - bench.layout.x,
       pointerOffsetY: point.y - bench.layout.y,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
       viewScale: layoutView.scale,
       viewOffsetX: layoutView.offsetX,
       viewOffsetY: layoutView.offsetY,
@@ -2121,6 +2716,46 @@ export default function Page() {
     setLayoutView({ scale: 1, offsetX: 0, offsetY: 0 });
   }
 
+  function addFloor() {
+    let nextCounter = 1;
+    const used = new Set(floors.map((floor) => floor.id));
+    while (used.has(`F${nextCounter}`)) {
+      nextCounter += 1;
+    }
+    const nextId = `F${nextCounter}`;
+    setFloors((prev) => [...prev, { id: nextId, name: `Floor ${nextCounter}` }]);
+    setSelectedFloorId(nextId);
+  }
+
+  function renameSelectedFloor(name: string) {
+    if (!selectedFloor) {
+      return;
+    }
+    setFloors((prev) => prev.map((floor) => (floor.id === selectedFloor.id ? { ...floor, name } : floor)));
+  }
+
+  function removeSelectedFloor() {
+    if (floors.length <= 1 || !selectedFloor) {
+      return;
+    }
+    if (!canRemoveSelectedFloor) {
+      setError("Floor cannot be removed while it still contains benches, teams, proximity requests, or pre-allocations.");
+      return;
+    }
+    const fallbackFloorId = floors.find((floor) => floor.id !== selectedFloor.id)?.id ?? floors[0].id;
+    setFloors((prev) => prev.filter((floor) => floor.id !== selectedFloor.id));
+    setSelectedFloorId(fallbackFloorId);
+  }
+
+  function selectWorkspaceFloor(floorId: string) {
+    setSelectedFloorId(floorId);
+    setResultFloorScopeId(floorId);
+  }
+
+  function selectAllFloorsForResults() {
+    setResultFloorScopeId(OUTPUT_SCOPE_ALL);
+  }
+
   async function handleFloorImageUpload(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     try {
@@ -2148,16 +2783,17 @@ export default function Page() {
     if (!Array.isArray(raw)) {
       return [];
     }
+    const used = new Set<string>();
     return raw
       .map((item, index) => {
         const bench = item as Partial<Bench>;
-        const id = String(bench.id ?? "").trim();
-        if (!id) {
-          return null;
-        }
+        const floorId = normalizeFloorId(String(bench.floorId ?? "F1"), "F1");
+        const fallbackId = `B${index + 1}`;
+        const baseId = ensureFloorQualifiedBenchId(String(bench.id ?? "").trim() || fallbackId, floorId);
+        const id = uniqueBenchId(baseId, used);
+        used.add(id);
         const capacity = Math.max(0, Number(bench.capacity) || 0);
         const order = Number.isFinite(Number(bench.order)) ? Number(bench.order) : index + 1;
-        const floorId = String(bench.floorId ?? "F1").trim() || "F1";
         const lx = Number(bench.layout?.x);
         const ly = Number(bench.layout?.y);
         const lw = Number(bench.layout?.w);
@@ -2217,10 +2853,14 @@ export default function Page() {
     return merged;
   }
 
-  function normalizeConfigTeams(raw: unknown): Team[] {
+  function normalizeConfigTeams(raw: unknown, benchesFromConfig: Bench[], fallbackFloorId: string): Team[] {
     if (!Array.isArray(raw)) {
       return [];
     }
+    const benchFloorMap = new Map<string, string>();
+    benchesFromConfig.forEach((bench) => {
+      benchFloorMap.set(bench.id, normalizeFloorId(bench.floorId, fallbackFloorId));
+    });
     return raw
       .map((item) => {
         const team = item as Partial<Team>;
@@ -2228,8 +2868,10 @@ export default function Page() {
         if (!id) {
           return null;
         }
+        const floorId = resolveTeamFloorId(team, benchFloorMap, fallbackFloorId);
         return {
           id,
+          floorId,
           size: Math.max(0, Number(team.size) || 0),
           targetDays: Math.max(0, Math.min(5, Number(team.targetDays) || 0)),
           preferredDays: toDayArray(team.preferredDays),
@@ -2269,7 +2911,11 @@ export default function Page() {
       .filter((item): item is PreallocationDraft => item !== null);
   }
 
-  function normalizeConfigProximity(raw: unknown): TeamProximityRequest[] {
+  function normalizeConfigProximity(
+    raw: unknown,
+    teamFloorById: Map<string, string>,
+    fallbackFloorId: string,
+  ): TeamProximityRequest[] {
     if (!Array.isArray(raw)) {
       return [];
     }
@@ -2282,9 +2928,12 @@ export default function Page() {
           return null;
         }
         const parsedDays = toDayArray(req.days);
+        const floorId =
+          normalizeFloorId(req.floorId, "") || teamFloorById.get(teamA) || teamFloorById.get(teamB) || fallbackFloorId;
         return {
           teamA,
           teamB,
+          floorId,
           strength: Math.max(1, Math.min(5, Number(req.strength) || 1)),
           strict: !!req.strict,
           days: parsedDays.length > 0 ? parsedDays : [...DAYS],
@@ -2301,19 +2950,27 @@ export default function Page() {
       .map((item, index) => {
         const scenario = item as Partial<ScenarioConfigEntry>;
         const benchesParsed = normalizeConfigBenches(scenario.benches);
-        const teamsParsed = normalizeConfigTeams(scenario.teams);
+        if (benchesParsed.length === 0) {
+          return null;
+        }
+        const inferredDefaultFloorId = benchesParsed[0]?.floorId ?? "F1";
+        const teamsParsed = normalizeConfigTeams(scenario.teams, benchesParsed, inferredDefaultFloorId);
         const preallocParsed = normalizeConfigPreallocations(scenario.preallocations);
-        if (benchesParsed.length === 0 || teamsParsed.length === 0) {
+        if (teamsParsed.length === 0) {
           return null;
         }
         const floorsParsed = normalizeConfigFloors(scenario.floors, benchesParsed);
         const selectedFloorId = String(scenario.selectedFloorId ?? "").trim();
         const settings = (scenario.settings ?? {}) as NonNullable<ScenarioConfigEntry["settings"]>;
+        const teamFloorById = new Map<string, string>();
+        teamsParsed.forEach((team) => {
+          teamFloorById.set(team.id, normalizeFloorId(team.floorId, floorsParsed[0]?.id ?? "F1"));
+        });
         const nextFlexOverrides: FlexOverrides = {};
         if (settings.flexOverrides) {
           for (const day of DAYS) {
             const rawValue = settings.flexOverrides[day];
-            if (rawValue === undefined || rawValue === null || rawValue === "") {
+            if (rawValue === undefined || rawValue === null) {
               continue;
             }
             const value = Number(rawValue);
@@ -2336,7 +2993,11 @@ export default function Page() {
           flexDefault: clamp(Number(settings.flexDefault ?? 10), 0, 100),
           flexOverrides: nextFlexOverrides,
           benchStabilityWeight: clamp(Number(settings.benchStabilityWeight ?? 6), 0, 10),
-          proximityRequests: normalizeConfigProximity(settings.proximityRequests),
+          proximityRequests: normalizeConfigProximity(
+            settings.proximityRequests,
+            teamFloorById,
+            floorsParsed[0]?.id ?? "F1",
+          ),
         };
       })
       .filter((scenario): scenario is PlannerScenario => scenario !== null);
@@ -2516,16 +3177,20 @@ export default function Page() {
         return;
       }
 
+      const usedIds = new Set<string>();
       const parsed: Bench[] = rows.slice(1).map((row, index) => {
-        const floorId = floorIdx >= 0 ? row[floorIdx] || "F1" : "F1";
+        const floorId = normalizeFloorId(floorIdx >= 0 ? row[floorIdx] : "", "F1");
         const x = xIdx >= 0 ? Number(row[xIdx]) : Number.NaN;
         const y = yIdx >= 0 ? Number(row[yIdx]) : Number.NaN;
         const w = wIdx >= 0 ? Number(row[wIdx]) : Number.NaN;
         const h = hIdx >= 0 ? Number(row[hIdx]) : Number.NaN;
         const rotation = rotationIdx >= 0 ? Number(row[rotationIdx]) : 0;
         const hasLayout = [x, y, w, h].every((value) => Number.isFinite(value));
+        const rowId = ensureFloorQualifiedBenchId(row[idIdx] || `B${index + 1}`, floorId);
+        const id = uniqueBenchId(rowId, usedIds);
+        usedIds.add(id);
         return {
-          id: row[idIdx],
+          id,
           capacity: Number(row[capIdx]),
           order: Number(row[orderIdx]),
           floorId,
@@ -2581,9 +3246,10 @@ export default function Page() {
       const contiguousIdx = headers.indexOf("contiguous_days_required");
       const anchorBenchIdx = headers.indexOf("anchor_bench_id");
       const anchorSeatsIdx = headers.indexOf("anchor_seats");
+      const floorIdx = headers.indexOf("floor_id");
       if (idIdx < 0 || sizeIdx < 0 || targetIdx < 0 || prefIdx < 0) {
         setError(
-          "Teams CSV must include id, size, target_days, preferred_days headers (optional: contiguous_days_required, anchor_bench_id, anchor_seats).",
+          "Teams CSV must include id, size, target_days, preferred_days headers (optional: floor_id, contiguous_days_required, anchor_bench_id, anchor_seats).",
         );
         setImportFeedback((prev) => ({ ...prev, teams: `Failed: ${file.name} (invalid headers)` }));
         return;
@@ -2591,6 +3257,7 @@ export default function Page() {
 
       const parsed: Team[] = rows.slice(1).map((row) => ({
         id: row[idIdx],
+        floorId: normalizeFloorId(floorIdx >= 0 ? row[floorIdx] : "", selectedFloorKey),
         size: Number(row[sizeIdx]),
         targetDays: Number(row[targetIdx]),
         preferredDays: parsePreferredDays(row[prefIdx] ?? ""),
@@ -2599,7 +3266,18 @@ export default function Page() {
         anchorSeats: anchorSeatsIdx >= 0 ? Math.max(0, Number(row[anchorSeatsIdx]) || 0) : 0,
       }));
 
-      setTeams(parsed.filter((team) => team.id));
+      const normalizedTeams = parsed.filter((team) => team.id);
+      setTeams(normalizedTeams);
+      setFloors((prev) => {
+        const next = [...prev];
+        const teamFloorIds = [...new Set(normalizedTeams.map((team) => normalizeFloorId(team.floorId, selectedFloorKey)))];
+        teamFloorIds.forEach((floorId) => {
+          if (!next.some((floor) => floor.id === floorId)) {
+            next.push({ id: floorId, name: floorId });
+          }
+        });
+        return next;
+      });
       setError(null);
       setImportFeedback((prev) => ({
         ...prev,
@@ -2665,31 +3343,44 @@ export default function Page() {
   }
 
   function buildPayload(): PlannerInput {
+    const payloadFallbackFloorId = floors[0]?.id ?? "F1";
+    const normalizedBenches = benches.map((bench) => ({
+      id: bench.id.trim(),
+      capacity: Number(bench.capacity),
+      order: Number(bench.order),
+      floorId: normalizeFloorId(bench.floorId, payloadFallbackFloorId),
+      layout: bench.layout
+        ? {
+            x: Number(bench.layout.x),
+            y: Number(bench.layout.y),
+            w: Number(bench.layout.w),
+            h: Number(bench.layout.h),
+            rotation: normalizeRotation(Number(bench.layout.rotation ?? 0)),
+          }
+        : undefined,
+    }));
+    const benchFloorByPayloadId = new Map<string, string>();
+    normalizedBenches.forEach((bench) => {
+      benchFloorByPayloadId.set(bench.id, normalizeFloorId(bench.floorId, payloadFallbackFloorId));
+    });
+    const normalizedTeams = teams.map((team) => ({
+      id: team.id.trim(),
+      floorId: resolveTeamFloorId(team, benchFloorByPayloadId, payloadFallbackFloorId),
+      size: Number(team.size),
+      targetDays: Number(team.targetDays),
+      preferredDays: team.preferredDays,
+      contiguousDaysRequired: !!team.contiguousDaysRequired,
+      anchorBenchId: (team.anchorBenchId ?? "").trim(),
+      anchorSeats: Math.max(0, Number(team.anchorSeats) || 0),
+    }));
+    const teamFloorByPayloadId = new Map<string, string>();
+    normalizedTeams.forEach((team) => {
+      teamFloorByPayloadId.set(team.id, normalizeFloorId(team.floorId, payloadFallbackFloorId));
+    });
+
     return {
-      benches: benches.map((bench) => ({
-        id: bench.id.trim(),
-        capacity: Number(bench.capacity),
-        order: Number(bench.order),
-        floorId: (bench.floorId ?? "F1").trim(),
-        layout: bench.layout
-          ? {
-              x: Number(bench.layout.x),
-              y: Number(bench.layout.y),
-              w: Number(bench.layout.w),
-              h: Number(bench.layout.h),
-              rotation: normalizeRotation(Number(bench.layout.rotation ?? 0)),
-            }
-          : undefined,
-      })),
-      teams: teams.map((team) => ({
-        id: team.id.trim(),
-        size: Number(team.size),
-        targetDays: Number(team.targetDays),
-        preferredDays: team.preferredDays,
-        contiguousDaysRequired: !!team.contiguousDaysRequired,
-        anchorBenchId: (team.anchorBenchId ?? "").trim(),
-        anchorSeats: Math.max(0, Number(team.anchorSeats) || 0),
-      })),
+      benches: normalizedBenches,
+      teams: normalizedTeams,
       preallocations: preallocationItems.map((item) => ({
         benchId: item.benchId.trim(),
         day: item.day,
@@ -2707,6 +3398,11 @@ export default function Page() {
         .map((item) => ({
           teamA: item.teamA.trim(),
           teamB: item.teamB.trim(),
+          floorId:
+            normalizeFloorId(item.floorId, "") ||
+            teamFloorByPayloadId.get(item.teamA.trim()) ||
+            teamFloorByPayloadId.get(item.teamB.trim()) ||
+            payloadFallbackFloorId,
           strength: Math.max(1, Math.min(5, Number(item.strength) || 1)),
           strict: !!item.strict,
           days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
@@ -2756,6 +3452,17 @@ export default function Page() {
     if (!moving) {
       return;
     }
+    const targetFloorId = normalizeFloorId(benchFloorById.get(benchId), selectedFloorKey);
+    if (moving.kind === "team" && moving.teamId) {
+      const teamFloorId = teamFloorById.get(moving.teamId) ?? selectedFloorKey;
+      if (teamFloorId !== targetFloorId) {
+        setManualError(
+          `Cannot move ${formatBlockLabel(moving)} to ${benchId} ${day}. Team ${moving.teamId} is assigned to floor ${teamFloorId}.`,
+        );
+        return;
+      }
+    }
+
     setSelectedAllocationId(blockId);
     if (moving.benchId === benchId && moving.day === day) {
       return;
@@ -2845,8 +3552,14 @@ export default function Page() {
       if (!selected || selected.kind === "prealloc") {
         return;
       }
+      const benchesForKeyboard =
+        normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? benchesInResultScope : benchesOnSelectedFloor;
+      const selectedBenchFloorId = normalizeFloorId(benchFloorById.get(selected.benchId), selectedFloorKey);
+      if (normalizedResultFloorScopeId !== OUTPUT_SCOPE_ALL && selectedBenchFloorId !== selectedFloorKey) {
+        return;
+      }
       const dayIndexCurrent = DAYS.indexOf(selected.day);
-      const benchIndexCurrent = benchesByOrder.findIndex((bench) => bench.id === selected.benchId);
+      const benchIndexCurrent = benchesForKeyboard.findIndex((bench) => bench.id === selected.benchId);
       if (dayIndexCurrent < 0 || benchIndexCurrent < 0) {
         return;
       }
@@ -2869,23 +3582,42 @@ export default function Page() {
         default:
           return;
       }
-      if (nextDayIndex < 0 || nextDayIndex >= DAYS.length || nextBenchIndex < 0 || nextBenchIndex >= benchesByOrder.length) {
+      if (
+        nextDayIndex < 0 ||
+        nextDayIndex >= DAYS.length ||
+        nextBenchIndex < 0 ||
+        nextBenchIndex >= benchesForKeyboard.length
+      ) {
         return;
       }
       event.preventDefault();
-      moveAllocation(selected.id, benchesByOrder[nextBenchIndex].id, DAYS[nextDayIndex]);
+      moveAllocation(selected.id, benchesForKeyboard[nextBenchIndex].id, DAYS[nextDayIndex]);
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeDragId, benchesByOrder, chipDragPreview, layoutDrag, manualAllocations, selectedAllocationId]);
+  }, [
+    activeDragId,
+    benchFloorById,
+    benchesInResultScope,
+    benchesOnSelectedFloor,
+    chipDragPreview,
+    layoutDrag,
+    manualAllocations,
+    normalizedResultFloorScopeId,
+    selectedAllocationId,
+    selectedFloorKey,
+  ]);
 
   function exportBenchPlanCsv() {
-    const rows: string[][] = [["bench", ...DAYS]];
-    for (const bench of benchesByOrder) {
+    const includeFloorColumn = normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL;
+    const rows: string[][] = [includeFloorColumn ? ["floor", "bench", ...DAYS] : ["bench", ...DAYS]];
+    for (const bench of benchesInResultScope) {
+      const floorId = normalizeFloorId(bench.floorId, selectedFloorKey);
       rows.push([
+        ...(includeFloorColumn ? [floorNameById.get(floorId) ?? floorId] : []),
         bench.id,
         ...DAYS.map((day) => {
           const prealloc = (preallocationMatrix[bench.id]?.[day] ?? []).map(formatBlockLabel);
@@ -2894,13 +3626,19 @@ export default function Page() {
         }),
       ]);
     }
-    downloadCsv("bench_day_plan.csv", rows);
+    downloadCsv(`bench_day_plan_${resultScopeFileSuffix}.csv`, rows);
   }
 
   function exportTeamViewCsv() {
-    const rows: string[][] = [["team", "day", "bench", "seats"]];
+    const includeFloorColumn = normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL;
+    const rows: string[][] = [includeFloorColumn ? ["floor", "team", "day", "bench", "seats"] : ["team", "day", "bench", "seats"]];
     const teamRows = manualAllocations
-      .filter((item) => item.kind === "team")
+      .filter(
+        (item) =>
+          item.kind === "team" &&
+          !!item.teamId &&
+          teamIdsInResultScope.has(item.teamId ?? ""),
+      )
       .sort((a, b) => {
         if ((a.teamId ?? "") !== (b.teamId ?? "")) {
           return (a.teamId ?? "").localeCompare(b.teamId ?? "");
@@ -2912,10 +3650,17 @@ export default function Page() {
       });
 
     for (const item of teamRows) {
-      rows.push([item.teamId ?? "", item.day, item.benchId, String(item.seats)]);
+      const floorId = normalizeFloorId(teamFloorById.get(item.teamId ?? ""), selectedFloorKey);
+      rows.push([
+        ...(includeFloorColumn ? [floorNameById.get(floorId) ?? floorId] : []),
+        item.teamId ?? "",
+        item.day,
+        item.benchId,
+        String(item.seats),
+      ]);
     }
 
-    downloadCsv("team_view_plan.csv", rows);
+    downloadCsv(`team_view_plan_${resultScopeFileSuffix}.csv`, rows);
   }
 
   function exportBenchPlanA4Pdf() {
@@ -2946,10 +3691,22 @@ export default function Page() {
     }
     const diagnostics = result.primary.diagnostics;
     const comparison = result.comparison.diagnostics;
-    const unmetTeams = diagnostics.teamDiagnostics.filter((row) => row.unmetDays > 0);
-    const monFriIssues = diagnostics.teamDiagnostics.filter((row) => !row.monFriSatisfied);
-    const fairnessWinners = teamDelta.filter((row) => row.delta > 0);
-    const fairnessLosers = teamDelta.filter((row) => row.delta < 0);
+    const teamRows = primaryTeamDiagnosticsInResultScope;
+    const comparisonRows = comparisonTeamDiagnosticsInResultScope;
+    const unmetTeams = teamRows.filter((row) => row.unmetDays > 0);
+    const monFriIssues = teamRows.filter((row) => !row.monFriSatisfied);
+    const fairnessWinners = teamDeltaInResultScope.filter((row) => row.delta > 0);
+    const fairnessLosers = teamDeltaInResultScope.filter((row) => row.delta < 0);
+    const scopedPrimaryMinRatio =
+      teamRows.length > 0 ? Math.min(...teamRows.map((row) => row.fulfillmentRatio)) : diagnostics.fairnessMinRatio;
+    const scopedComparisonMinRatio =
+      comparisonRows.length > 0 ? Math.min(...comparisonRows.map((row) => row.fulfillmentRatio)) : comparison.fairnessMinRatio;
+    const scopedContiguityPenalty = teamsInResultScope.reduce((acc, team) => {
+      if (!team.contiguousDaysRequired) {
+        return acc;
+      }
+      return teamContiguousStatus.get(team.id) ? acc : acc + 1;
+    }, 0);
 
     return {
       diagnostics,
@@ -2958,8 +3715,18 @@ export default function Page() {
       monFriIssues,
       fairnessWinners,
       fairnessLosers,
+      scopedPrimaryMinRatio,
+      scopedComparisonMinRatio,
+      scopedContiguityPenalty,
     };
-  }, [result, teamDelta]);
+  }, [
+    comparisonTeamDiagnosticsInResultScope,
+    primaryTeamDiagnosticsInResultScope,
+    result,
+    teamContiguousStatus,
+    teamDeltaInResultScope,
+    teamsInResultScope,
+  ]);
 
   return (
     <main className="page">
@@ -2972,25 +3739,80 @@ export default function Page() {
         </p>
       </section>
 
-      <section className={`plan-health-bar is-${planHealth.level}`}>
-        <div className="plan-health-main">
-          <strong>{planHealth.title}</strong>
-          <span>
-            Steps complete: {planHealth.completion}/{planHealth.total}
-          </span>
-          <span>Errors: {planHealth.errorCount}</span>
-          <span>Warnings: {planHealth.warningCount}</span>
-        </div>
-        <div className="plan-health-steps">
-          {stepHealth.map((step) => (
-            <span
-              key={step.id}
-              className={`plan-health-step ${step.done ? "is-done" : "is-pending"}`}
-              title={step.done ? "Completed" : "Needs attention"}
-            >
-              {step.label}
+      <section className={`workspace-bar is-${planHealth.level}`}>
+        <div className="workspace-bar-row">
+          <div className="workspace-summary">
+            <strong>{planHealth.title}</strong>
+            <span>
+              Active floor: <strong>{selectedFloor?.name ?? selectedFloorKey}</strong>
             </span>
-          ))}
+            <span>
+              Output scope: <strong>{resultScopeLabel}</strong>
+            </span>
+            <span>
+              Steps: {planHealth.completion}/{planHealth.total}
+            </span>
+          </div>
+          <div className="workspace-status">
+            <span className={`workspace-chip ${planHealth.errorCount > 0 ? "is-error" : "is-ok"}`}>
+              Errors {planHealth.errorCount}
+            </span>
+            <span className={`workspace-chip ${planHealth.warningCount > 0 ? "is-warning" : "is-ok"}`}>
+              Warnings {planHealth.warningCount}
+            </span>
+            <span className={`workspace-chip ${workspaceStatus.overCapacityFloors > 0 ? "is-warning" : "is-ok"}`}>
+              Floor pressure {workspaceStatus.overCapacityFloors}
+            </span>
+            <span className={`workspace-chip ${workspaceStatus.generated ? "is-ok" : "is-muted"}`}>
+              {workspaceStatus.generated ? "Plan generated" : "Plan not generated"}
+            </span>
+            {normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? (
+              <span className="workspace-chip is-info">All floors selected for outputs</span>
+            ) : null}
+          </div>
+        </div>
+        <div className="workspace-floor-switch">
+          <span className="workspace-floor-label">Floor scope</span>
+          {useFloorDropdown ? (
+            <div className="workspace-floor-switch-controls">
+              <select value={selectedFloorKey} onChange={(event) => selectWorkspaceFloor(event.target.value)}>
+                {floors.map((floor) => (
+                  <option key={`workspace-switch-${floor.id}`} value={floor.id}>
+                    {floor.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={`workspace-floor-result-tab ${normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? "is-active" : ""}`}
+                onClick={selectAllFloorsForResults}
+              >
+                All floors (results)
+              </button>
+            </div>
+          ) : (
+            <div className="workspace-floor-switch-controls">
+              <div className="workspace-floor-tabs">
+                {floors.map((floor) => (
+                  <button
+                    type="button"
+                    key={`workspace-tab-${floor.id}`}
+                    className={floor.id === selectedFloorKey ? "is-active" : ""}
+                    onClick={() => selectWorkspaceFloor(floor.id)}
+                  >
+                    {floor.name}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className={`workspace-floor-result-tab ${normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? "is-active" : ""}`}
+                onClick={selectAllFloorsForResults}
+              >
+                All floors (results)
+              </button>
+            </div>
+          )}
         </div>
       </section>
 
@@ -3007,7 +3829,7 @@ export default function Page() {
                   <span className={`validation-dot is-${issue.level}`} />
                   <span className="validation-message">{issue.message}</span>
                   {issue.fixCode && issue.fixLabel ? (
-                    <button type="button" onClick={() => applyValidationFix(issue.fixCode)}>
+                    <button type="button" onClick={() => applyValidationFix(issue.fixCode!)}>
                       {issue.fixLabel}
                     </button>
                   ) : null}
@@ -3054,15 +3876,93 @@ export default function Page() {
         <p className="metric-row">{autosaveStatus}</p>
       </section>
 
+      <section className="panel floor-scope-panel">
+        <div className="scenario-head">
+          <h2>Floor Workspace</h2>
+          <p className="subtle">
+            Top-level floor scope for benches, teams, proximity, pre-allocations, and manual Bench x Day adjustments.
+          </p>
+        </div>
+        <div className="floor-scope-grid">
+          <div className="floor-admin-card">
+            <h3>Floor Management</h3>
+            <label>
+              Floor name
+              <input value={selectedFloor?.name ?? ""} onChange={(event) => renameSelectedFloor(event.target.value)} />
+            </label>
+            <div className="floor-admin-actions">
+              <button type="button" onClick={addFloor}>
+                Add floor
+              </button>
+              <button type="button" onClick={removeSelectedFloor} disabled={!canRemoveSelectedFloor}>
+                Remove floor
+              </button>
+            </div>
+            <p className="subtle">
+              You can remove a floor only when it has no benches, teams, pre-allocations, or proximity requests.
+            </p>
+          </div>
+          <div className="floor-summary-card">
+            <p className="metric-row">Use the sticky floor tabs above to switch workspace scope.</p>
+            <p className="metric-row">
+              {selectedFloorConstraints
+                ? `${selectedFloorConstraints.floorName}: ${selectedFloorConstraints.benchCount} benches, ${selectedFloorConstraints.capacitySeats} seats, ${selectedFloorConstraints.teamCount} teams, ${selectedFloorConstraints.teamHeadcount} people`
+                : "No floor selected."}
+            </p>
+          </div>
+        </div>
+        <table className="floor-constraints-table">
+          <thead>
+            <tr>
+              <th>Floor</th>
+              <th>Benches</th>
+              <th>Seats</th>
+              <th>Teams</th>
+              <th>Headcount</th>
+              <th>Anchored teams</th>
+              <th>Demand (seat-days)</th>
+              <th>Prealloc (seat-days)</th>
+              <th>Strict proximity</th>
+              <th>Demand vs net cap</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {floorConstraintRows.map((row) => (
+              <tr
+                key={`floor-constraint-${row.floorId}`}
+                className={row.floorId === selectedFloorKey ? "is-active-floor-row" : ""}
+              >
+                <td>{row.floorName}</td>
+                <td>{row.benchCount}</td>
+                <td>{row.capacitySeats}</td>
+                <td>{row.teamCount}</td>
+                <td>{row.teamHeadcount}</td>
+                <td>{row.anchoredTeams}</td>
+                <td>{row.demandSeatDays}</td>
+                <td>{row.preallocatedSeatDays}</td>
+                <td>{row.strictProximityRows}</td>
+                <td>{row.demandRatio === null ? "n/a" : `${row.demandRatio.toFixed(1)}%`}</td>
+                <td>
+                  <button type="button" onClick={() => setSelectedFloorId(row.floorId)}>
+                    Focus
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
       <CollapsibleSection
         className="grid-two"
-        title="Step 0: Import & Policy"
-        description="Load data and choose solver/flex target policy."
-        defaultOpen
+        title="Data Exchange"
+        description="One place for all imports and exports."
+        defaultOpen={false}
       >
         <div>
           <h3>Import Data</h3>
-          <p className="subtle">CSV imports replace one table. Config JSON restores a full session in one step.</p>
+          <p className="subtle">CSV imports replace one table. JSON imports restore full sessions or bench layouts.</p>
           <div className="template-links">
             <a href="/templates/benches.csv" download>
               benches.csv
@@ -3079,7 +3979,6 @@ export default function Page() {
             <input type="file" accept=".json,application/json" onChange={importSessionConfig} />
           </label>
           {importFeedback.config ? <p className="file-note">{importFeedback.config}</p> : null}
-          <button onClick={exportSessionConfig}>Export full config (JSON)</button>
           <label>
             Benches CSV
             <input type="file" accept=".csv" onChange={handleBenchCsv} />
@@ -3095,8 +3994,39 @@ export default function Page() {
             <input type="file" accept=".csv" onChange={handlePreallocationCsv} />
           </label>
           {importFeedback.preallocations ? <p className="file-note">{importFeedback.preallocations}</p> : null}
+          <label>
+            Layout profile JSON
+            <input type="file" accept=".json,application/json" onChange={importLayoutProfile} />
+          </label>
         </div>
 
+        <div>
+          <h3>Export Data</h3>
+          <p className="subtle">
+            Exported files use output scope <strong>{resultScopeLabel}</strong>.
+          </p>
+          <div className="export-actions">
+            <button onClick={exportSessionConfig}>Export full config (JSON)</button>
+            <button onClick={exportLayoutProfile}>Export layout profile (JSON)</button>
+            <button onClick={exportBenchPlanCsv} disabled={!result}>
+              Export bench x day CSV
+            </button>
+            <button onClick={exportTeamViewCsv} disabled={!result}>
+              Export team view CSV
+            </button>
+            <button onClick={exportBenchPlanA4Pdf} disabled={!result}>
+              Export Bench x Day A4 PDF
+            </button>
+          </div>
+          {!result ? <p className="metric-row">Generate a plan to enable schedule exports (CSV/PDF).</p> : null}
+        </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Step 0: Policy"
+        description="Choose solver priority and flex target policy."
+        defaultOpen
+      >
         <div>
           <h3>Policy</h3>
           <p className="subtle">Fairness can be switched at run time.</p>
@@ -3145,7 +4075,11 @@ export default function Page() {
         </div>
       </CollapsibleSection>
 
-      <CollapsibleSection title="Step 1: Benches" description="Define bench IDs, capacity, and floor." defaultOpen={false}>
+      <CollapsibleSection
+        title="Step 1: Benches"
+        description={`Define benches for ${selectedFloor?.name ?? selectedFloorKey}. Benches are floor-scoped and cannot be moved between floors.`}
+        defaultOpen={false}
+      >
         <table>
           <thead>
             <tr>
@@ -3157,10 +4091,15 @@ export default function Page() {
             </tr>
           </thead>
           <tbody>
-            {benches.map((bench, index) => (
+            {benchesOnSelectedFloorWithIndex.map(({ bench, index }) => (
               <tr key={`bench-${index}`}>
                 <td>
-                  <input value={bench.id} onChange={(e) => updateBench(index, { id: e.target.value })} />
+                  <input
+                    value={bench.id}
+                    onChange={(e) => updateBench(index, { id: e.target.value })}
+                    onBlur={(e) => normalizeBenchIdAtIndex(index, e.target.value)}
+                    placeholder={`${selectedFloorKey}-B#`}
+                  />
                 </td>
                 <td>
                   <input
@@ -3173,36 +4112,43 @@ export default function Page() {
                   <input type="number" value={bench.order} onChange={(e) => updateBench(index, { order: Number(e.target.value) })} />
                 </td>
                 <td>
-                  <select
-                    value={bench.floorId ?? selectedFloor?.id ?? "F1"}
-                    onChange={(e) => updateBench(index, { floorId: e.target.value })}
-                  >
-                    {floors.map((floor) => (
-                      <option value={floor.id} key={`bench-floor-${bench.id}-${floor.id}`}>
-                        {floor.name}
-                      </option>
-                    ))}
-                  </select>
+                  <span>{selectedFloor?.name ?? normalizeFloorId(bench.floorId, selectedFloorKey)}</span>
                 </td>
                 <td>
                   <button onClick={() => setBenches((prev) => prev.filter((_, i) => i !== index))}>Delete</button>
                 </td>
               </tr>
             ))}
+            {benchesOnSelectedFloorWithIndex.length === 0 ? (
+              <tr>
+                <td colSpan={5}>
+                  <span className="subtle">No benches on this floor yet.</span>
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
         <button
           onClick={() =>
-            setBenches((prev) => [
-              ...prev,
-              {
-                id: `B${prev.length + 1}`,
-                capacity: 8,
-                order: prev.length + 1,
-                floorId: selectedFloor?.id ?? "F1",
-                layout: defaultLayoutForIndex(prev.length),
-              },
-            ])
+            setBenches((prev) => {
+              const used = new Set(prev.map((bench) => bench.id));
+              let counter = 1;
+              let candidate = `${selectedFloorKey}-B${counter}`;
+              while (used.has(candidate)) {
+                counter += 1;
+                candidate = `${selectedFloorKey}-B${counter}`;
+              }
+              return [
+                ...prev,
+                {
+                  id: candidate,
+                  capacity: 8,
+                  order: prev.length + 1,
+                  floorId: selectedFloorKey,
+                  layout: defaultLayoutForIndex(prev.length),
+                },
+              ];
+            })
           }
         >
           Add bench
@@ -3214,308 +4160,346 @@ export default function Page() {
         description="Place benches on the floor image, then rotate/resize for angled walls."
         defaultOpen={false}
       >
-        <div className="layout-toolbar">
-          <label>
-            Active floor
-            <select value={selectedFloor?.id ?? ""} onChange={(e) => setSelectedFloorId(e.target.value)}>
-              {floors.map((floor) => (
-                <option value={floor.id} key={`floor-${floor.id}`}>
-                  {floor.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Floor name
-            <input
-              value={selectedFloor?.name ?? ""}
-              onChange={(e) =>
-                setFloors((prev) =>
-                  prev.map((floor) => (floor.id === selectedFloor?.id ? { ...floor, name: e.target.value } : floor)),
-                )
-              }
-            />
-          </label>
-          <button
-            onClick={() => {
-              const nextId = `F${floors.length + 1}`;
-              setFloors((prev) => [...prev, { id: nextId, name: `Floor ${floors.length + 1}` }]);
-              setSelectedFloorId(nextId);
-            }}
-          >
-            Add floor
-          </button>
-          <button
-            onClick={() => {
-              if (floors.length <= 1 || !selectedFloor) {
-                return;
-              }
-              const fallbackFloorId = floors.find((floor) => floor.id !== selectedFloor.id)?.id ?? floors[0].id;
-              setFloors((prev) => prev.filter((floor) => floor.id !== selectedFloor.id));
-              setBenches((prev) =>
-                prev.map((bench) => (bench.floorId === selectedFloor.id ? { ...bench, floorId: fallbackFloorId } : bench)),
-              );
-              setSelectedFloorId(fallbackFloorId);
-            }}
-          >
-            Remove floor
-          </button>
-        </div>
-        <div className="layout-toolbar">
-          <label>
-            Floor image
-            <input type="file" accept="image/*" onChange={handleFloorImageUpload} />
-          </label>
-          <label>
-            Import layout profile (JSON)
-            <input type="file" accept=".json,application/json" onChange={importLayoutProfile} />
-          </label>
-          <button onClick={exportLayoutProfile}>Export layout profile (JSON)</button>
-          <div className="layout-view-controls">
-            <button onClick={() => setLayoutView((prev) => ({ ...prev, scale: clamp(prev.scale * 0.9, 0.5, 4) }))}>-</button>
-            <span>{Math.round(layoutView.scale * 100)}%</span>
-            <button onClick={() => setLayoutView((prev) => ({ ...prev, scale: clamp(prev.scale * 1.1, 0.5, 4) }))}>+</button>
-            <button onClick={resetLayoutView}>Reset view</button>
-          </div>
-          <label>
-            Plan day view
-            <select value={layoutDayView} onChange={(event) => setLayoutDayView(event.target.value as LayoutDayView)}>
-              <option value="off">Off (blank benches)</option>
-              {DAYS.map((day) => (
-                <option value={day} key={`layout-day-${day}`}>
-                  {day}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="single-check heatmap-toggle">
-            <input
-              type="checkbox"
-              checked={showHeatmap}
-              onChange={(event) => setShowHeatmap(event.target.checked)}
-              disabled={!isLayoutPlanViewActive}
-            />
-            Heatmap
-          </label>
-          <div className="layout-rotation-controls">
-            <span>{selectedBenchOnFloor ? `Rotate ${selectedBenchOnFloor.id}` : "Select a bench to rotate"}</span>
-            <button
-              onClick={() =>
-                updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) - 15)
-              }
-              disabled={!selectedBenchOnFloor}
-            >
-              -15°
-            </button>
-            <input
-              type="number"
-              min={-180}
-              max={180}
-              step={1}
-              value={selectedBenchOnFloor ? Math.round(Number(selectedBenchOnFloor.layout?.rotation ?? 0)) : 0}
-              onChange={(event) => updateSelectedBenchRotation(Number(event.target.value))}
-              disabled={!selectedBenchOnFloor}
-            />
-            <button
-              onClick={() =>
-                updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) + 15)
-              }
-              disabled={!selectedBenchOnFloor}
-            >
-              +15°
-            </button>
-            <button onClick={() => updateSelectedBenchRotation(0)} disabled={!selectedBenchOnFloor}>
-              Reset
-            </button>
-          </div>
-        </div>
-        <p className="metric-row">
-          Drag bench blocks to set position. Layout profile JSON can be re-imported after code updates and reused for future
-          floors.
-        </p>
-        <div
-          className={`layout-canvas ${layoutDrag?.mode === "pan" ? "is-panning" : ""}`}
-          ref={layoutCanvasRef}
-          onMouseDown={startLayoutPan}
-        >
-          <div
-            className="layout-scene"
-            style={{
-              transform: `translate(${layoutView.offsetX}px, ${layoutView.offsetY}px) scale(${layoutView.scale})`,
-            }}
-          >
-            {selectedFloor?.imageDataUrl ? (
-              <Image
-                src={selectedFloor.imageDataUrl}
-                alt={`${selectedFloor.name} layout`}
-                className="layout-image"
-                fill
-                sizes="100vw"
-                unoptimized
-              />
-            ) : (
-              <div className="layout-placeholder">No floor image yet. Upload one to start bench positioning.</div>
-            )}
-            {benchesOnSelectedFloor.map((bench, index) => {
-              const layout = bench.layout ?? defaultLayoutForIndex(index);
-              const sizing = benchTextSizing(layout);
-              const daySummary = layoutDaySummary.get(bench.id);
-              const isSelectedBench = selectedBenchId === bench.id;
-              const isDimmed = selectedBenchId !== null && !isSelectedBench;
-              const dominantTeamColor = isLayoutPlanViewActive && daySummary?.topTeamId
-                ? teamColorMap[daySummary.topTeamId] ??
-                  TEAM_BASE_COLORS[hashTeam(daySummary.topTeamId) % TEAM_BASE_COLORS.length]
-                : "#0057b8";
-              const isEmptyBench = isLayoutPlanViewActive && (daySummary?.usedSeats ?? 0) === 0;
-              const occupancyRatio = bench.capacity > 0 ? (daySummary?.usedSeats ?? 0) / bench.capacity : 0;
-              const layerColor = showHeatmap && isLayoutPlanViewActive ? heatColorByRatio(occupancyRatio) : dominantTeamColor;
-              const dominantRgb = hexToRgb(layerColor);
-              const benchBgRgb: [number, number, number] = isEmptyBench
-                ? [230, 236, 242]
-                : mixRgb(dominantRgb, [255, 255, 255], isLayoutPlanViewActive ? 0.18 : 0.4);
-              const benchBg = rgbCss(benchBgRgb);
-              const benchBorder = isEmptyBench
-                ? "#8b9bad"
-                : rgbCss(mixRgb(hexToRgb(dominantTeamColor), [0, 0, 0], 0.15));
-              const darkText: [number, number, number] = [16, 42, 74];
-              const lightText: [number, number, number] = [255, 255, 255];
-              const benchText: [number, number, number] = isEmptyBench
-                ? [45, 65, 90]
-                : contrastRatio(benchBgRgb, darkText) >= contrastRatio(benchBgRgb, lightText)
-                  ? darkText
-                  : lightText;
-              const hoverTitle = (() => {
-                if (!isLayoutPlanViewActive) {
-                  return `${bench.id} (${bench.capacity} seats)`;
-                }
-                const day = layoutDayView as Day;
-                const teamRows = (allocationMatrix[bench.id]?.[day] ?? []).filter((item) => item.kind === "team");
-                const teamTotals = new Map<string, number>();
-                teamRows.forEach((item) => {
-                  if (!item.teamId) {
-                    return;
-                  }
-                  teamTotals.set(item.teamId, (teamTotals.get(item.teamId) ?? 0) + item.seats);
-                });
-                const lines = [
-                  `${bench.id} - ${day}`,
-                  `Used: ${daySummary?.usedSeats ?? 0}/${bench.capacity}`,
-                ];
-                if (teamTotals.size === 0) {
-                  lines.push("Teams: none");
-                } else {
-                  lines.push(
-                    ...Array.from(teamTotals.entries())
-                      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-                      .map(([teamId, seats]) => `${teamId}: ${seats}`),
-                  );
-                }
-                if ((daySummary?.preallocatedSeats ?? 0) > 0) {
-                  lines.push(`Preallocated: ${daySummary?.preallocatedSeats ?? 0}`);
-                }
-                if ((daySummary?.flexSeats ?? 0) > 0) {
-                  lines.push(`Flex: ${daySummary?.flexSeats ?? 0}`);
-                }
-                return lines.join("\n");
-              })();
-              return (
-                <div
-                  key={`layout-${bench.id}`}
-                  className={[
-                    "bench-block",
-                    isSelectedBench ? "is-selected" : "",
-                    isDimmed ? "is-dimmed" : "",
-                    isEmptyBench ? "is-empty" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  style={{
-                    left: `${layout.x}%`,
-                    top: `${layout.y}%`,
-                    width: `${layout.w}%`,
-                    height: `${layout.h}%`,
-                    zIndex: isSelectedBench ? 40 : 2,
-                    backgroundColor: benchBg,
-                    borderColor: benchBorder,
-                    borderStyle: isEmptyBench ? "dashed" : "solid",
-                    color: rgbCss(benchText),
-                    transform: `rotate(${normalizeRotation(Number(layout.rotation ?? 0))}deg)`,
-                  }}
-                  onMouseDown={(event) => {
-                    if (!bench.layout) {
-                      ensureBenchLayout(bench.id);
-                    }
-                    startLayoutDrag(event, { ...bench, layout });
-                  }}
-                  onClick={() => setSelectedBenchId((prev) => (prev === bench.id ? null : bench.id))}
-                  title={hoverTitle}
-                >
-                  <span className="bench-id" style={{ fontSize: `${sizing.title}px` }}>
-                    {bench.id}
-                  </span>
-                  <small className="bench-seat-value" style={{ fontSize: `${sizing.seat}px` }}>
-                    {bench.capacity}
-                  </small>
-                  {isSelectedBench ? (
-                    <>
-                      <button
-                        type="button"
-                        className="bench-rotate-handle"
-                        onMouseDown={(event) => startLayoutRotate(event, { ...bench, layout })}
-                        onClick={(event) => event.stopPropagation()}
-                        title={`Rotate ${bench.id}`}
-                        aria-label={`Rotate ${bench.id}`}
-                      />
-                      <button
-                        type="button"
-                        className="bench-resize-handle"
-                        onMouseDown={(event) => startLayoutResize(event, { ...bench, layout })}
-                        onClick={(event) => event.stopPropagation()}
-                        title={`Resize ${bench.id}`}
-                        aria-label={`Resize ${bench.id}`}
-                      />
-                    </>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <p className="metric-row">
-          Tips: Click a bench to focus it. Drag empty canvas to pan. Scroll to zoom. Drag the top circular handle to rotate
-          (hold Shift to snap by 15 degrees), and drag the subtle bottom-right corner grip to resize.
-          Use the rotation controls for angled walls.
-          {isLayoutPlanViewActive
-            ? ` Day overlay reflects ${layoutDayView} allocations from the current plan.`
-            : " Plan overlay is OFF. Switch to a day to preview allocations on benches."}
-        </p>
-        {isLayoutPlanViewActive && showHeatmap ? (
-          <div className="heatmap-legend">
-            <span>Heatmap</span>
-            <div className="heatmap-scale">
-              <i style={{ backgroundColor: "#19a974" }} />
-              <i style={{ backgroundColor: "#5dbb63" }} />
-              <i style={{ backgroundColor: "#e0a100" }} />
-              <i style={{ backgroundColor: "#e36c0a" }} />
-              <i style={{ backgroundColor: "#c1373d" }} />
+        <div className="layout-editor-controls">
+          <div className="layout-control-card">
+            <h3>Floor Image</h3>
+            <div className="layout-toolbar">
+              <div className="layout-floor-badge">Active floor: {selectedFloor?.name ?? selectedFloorKey}</div>
+              <label>
+                Floor image
+                <input type="file" accept="image/*" onChange={handleFloorImageUpload} />
+              </label>
             </div>
-            <small>Low occupancy</small>
-            <small>High occupancy</small>
+            <p className="subtle">Floor creation and naming are managed from the Floor Workspace panel.</p>
           </div>
-        ) : null}
-        {isLayoutPlanViewActive && selectedBenchDaySummary ? (
-          <p className="metric-row">
-            {selectedBenchDaySummary.bench.id} {layoutDayView}: {selectedBenchDaySummary.summary.usedSeats}/
-            {selectedBenchDaySummary.bench.capacity} used | team {selectedBenchDaySummary.summary.teamSeats} | prealloc{" "}
-            {selectedBenchDaySummary.summary.preallocatedSeats} | flex {selectedBenchDaySummary.summary.flexSeats}
-            {selectedBenchDaySummary.summary.topTeamId ? ` | top team ${selectedBenchDaySummary.summary.topTeamId}` : ""}
-          </p>
-        ) : null}
+
+          <div className="layout-control-card">
+            <h3>View</h3>
+            <div className="layout-toolbar">
+              <div className="layout-view-controls">
+                <button onClick={() => setLayoutView((prev) => ({ ...prev, scale: clamp(prev.scale * 0.9, 0.5, 4) }))}>-</button>
+                <span>{Math.round(layoutView.scale * 100)}%</span>
+                <button onClick={() => setLayoutView((prev) => ({ ...prev, scale: clamp(prev.scale * 1.1, 0.5, 4) }))}>+</button>
+                <button onClick={resetLayoutView}>Reset view</button>
+              </div>
+              <label>
+                Plan day view
+                <select value={layoutDayView} onChange={(event) => setLayoutDayView(event.target.value as LayoutDayView)}>
+                  <option value="off">Off (blank benches)</option>
+                  {DAYS.map((day) => (
+                    <option value={day} key={`layout-day-${day}`}>
+                      {day}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="single-check heatmap-toggle">
+                <input
+                  type="checkbox"
+                  checked={showHeatmap}
+                  onChange={(event) => setShowHeatmap(event.target.checked)}
+                  disabled={!isLayoutPlanViewActive}
+                />
+                Heatmap
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div className="layout-editor-main">
+          <div>
+            <div
+              className={`layout-canvas ${layoutDrag?.mode === "pan" ? "is-panning" : ""}`}
+              ref={layoutCanvasRef}
+              onMouseDown={startLayoutPan}
+            >
+              <div
+                className="layout-scene"
+                style={{
+                  transform: `translate(${layoutView.offsetX}px, ${layoutView.offsetY}px) scale(${layoutView.scale})`,
+                }}
+              >
+                {selectedFloor?.imageDataUrl ? (
+                  <Image
+                    src={selectedFloor.imageDataUrl}
+                    alt={`${selectedFloor.name} layout`}
+                    className="layout-image"
+                    fill
+                    sizes="100vw"
+                    unoptimized
+                  />
+                ) : (
+                  <div className="layout-placeholder">No floor image yet. Upload one to start bench positioning.</div>
+                )}
+                {benchesOnSelectedFloor.map((bench, index) => {
+                  const layout = bench.layout ?? defaultLayoutForIndex(index);
+                  const sizing = benchTextSizing(layout);
+                  const labelMode = benchLabelMode(layout, bench.id);
+                  const daySummary = layoutDaySummary.get(bench.id);
+                  const isSelectedBench = selectedBenchId === bench.id;
+                  const isDimmed = selectedBenchId !== null && !isSelectedBench;
+                  const dominantTeamColor = isLayoutPlanViewActive && daySummary?.topTeamId
+                    ? teamColorMap[daySummary.topTeamId] ??
+                      TEAM_BASE_COLORS[hashTeam(daySummary.topTeamId) % TEAM_BASE_COLORS.length]
+                    : "#0057b8";
+                  const isEmptyBench = isLayoutPlanViewActive && (daySummary?.usedSeats ?? 0) === 0;
+                  const occupancyRatio = bench.capacity > 0 ? (daySummary?.usedSeats ?? 0) / bench.capacity : 0;
+                  const layerColor = showHeatmap && isLayoutPlanViewActive ? heatColorByRatio(occupancyRatio) : dominantTeamColor;
+                  const dominantRgb = hexToRgb(layerColor);
+                  const benchBgRgb: [number, number, number] = isEmptyBench
+                    ? [230, 236, 242]
+                    : mixRgb(dominantRgb, [255, 255, 255], isLayoutPlanViewActive ? 0.18 : 0.4);
+                  const benchBg = rgbCss(benchBgRgb);
+                  const benchBorder = isEmptyBench
+                    ? "#8b9bad"
+                    : rgbCss(mixRgb(hexToRgb(dominantTeamColor), [0, 0, 0], 0.15));
+                  const darkText: [number, number, number] = [16, 42, 74];
+                  const lightText: [number, number, number] = [255, 255, 255];
+                  const benchText: [number, number, number] = isEmptyBench
+                    ? [45, 65, 90]
+                    : contrastRatio(benchBgRgb, darkText) >= contrastRatio(benchBgRgb, lightText)
+                      ? darkText
+                      : lightText;
+                  const calloutLeft = clamp(layout.x + layout.w / 2, 3, 97);
+                  const calloutTop = clamp(layout.y - 1, 2, 98);
+                  const hoverTitle = (() => {
+                    if (!isLayoutPlanViewActive) {
+                      return `${bench.id} (${bench.capacity} seats)`;
+                    }
+                    const day = layoutDayView as Day;
+                    const teamRows = (allocationMatrix[bench.id]?.[day] ?? []).filter((item) => item.kind === "team");
+                    const teamTotals = new Map<string, number>();
+                    teamRows.forEach((item) => {
+                      if (!item.teamId) {
+                        return;
+                      }
+                      teamTotals.set(item.teamId, (teamTotals.get(item.teamId) ?? 0) + item.seats);
+                    });
+                    const lines = [
+                      `${bench.id} - ${day}`,
+                      `Used: ${daySummary?.usedSeats ?? 0}/${bench.capacity}`,
+                    ];
+                    if (teamTotals.size === 0) {
+                      lines.push("Teams: none");
+                    } else {
+                      lines.push(
+                        ...Array.from(teamTotals.entries())
+                          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+                          .map(([teamId, seats]) => `${teamId}: ${seats}`),
+                      );
+                    }
+                    if ((daySummary?.preallocatedSeats ?? 0) > 0) {
+                      lines.push(`Preallocated: ${daySummary?.preallocatedSeats ?? 0}`);
+                    }
+                    if ((daySummary?.flexSeats ?? 0) > 0) {
+                      lines.push(`Flex: ${daySummary?.flexSeats ?? 0}`);
+                    }
+                    return lines.join("\n");
+                  })();
+                  return (
+                    <Fragment key={`layout-${bench.id}`}>
+                      <div
+                        className={[
+                          "bench-block",
+                          isSelectedBench ? "is-selected" : "",
+                          isDimmed ? "is-dimmed" : "",
+                          isEmptyBench ? "is-empty" : "",
+                          labelMode === "vertical" ? "has-vertical-id" : "",
+                          labelMode === "callout" ? "has-callout-id" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        style={{
+                          left: `${layout.x}%`,
+                          top: `${layout.y}%`,
+                          width: `${layout.w}%`,
+                          height: `${layout.h}%`,
+                          zIndex: isSelectedBench ? 40 : 2,
+                          backgroundColor: benchBg,
+                          borderColor: benchBorder,
+                          borderStyle: isEmptyBench ? "dashed" : "solid",
+                          color: rgbCss(benchText),
+                          transform: `rotate(${normalizeRotation(Number(layout.rotation ?? 0))}deg)`,
+                        }}
+                        onMouseDown={(event) => {
+                          if (!bench.layout) {
+                            ensureBenchLayout(bench.id);
+                          }
+                          startLayoutDrag(event, { ...bench, layout });
+                        }}
+                        onClick={() => setSelectedBenchId((prev) => (prev === bench.id ? null : bench.id))}
+                        title={hoverTitle}
+                      >
+                        {labelMode !== "callout" ? (
+                          <span
+                            className={`bench-id ${labelMode === "vertical" ? "is-vertical" : ""}`}
+                            style={{ fontSize: `${sizing.title}px` }}
+                          >
+                            {bench.id}
+                          </span>
+                        ) : null}
+                        <small className="bench-seat-value" style={{ fontSize: `${sizing.seat}px` }}>
+                          <span className="bench-seat-pill">{bench.capacity}</span>
+                        </small>
+                        {isSelectedBench ? (
+                          <>
+                            <button
+                              type="button"
+                              className="bench-rotate-handle"
+                              onMouseDown={(event) => startLayoutRotate(event, { ...bench, layout })}
+                              onClick={(event) => event.stopPropagation()}
+                              title={`Rotate ${bench.id}`}
+                              aria-label={`Rotate ${bench.id}`}
+                            />
+                            <button
+                              type="button"
+                              className="bench-resize-handle"
+                              onMouseDown={(event) => startLayoutResize(event, { ...bench, layout })}
+                              onClick={(event) => event.stopPropagation()}
+                              title={`Resize ${bench.id}`}
+                              aria-label={`Resize ${bench.id}`}
+                            />
+                          </>
+                        ) : null}
+                      </div>
+                      {labelMode === "callout" ? (
+                        <button
+                          type="button"
+                          className={`bench-id-callout ${isSelectedBench ? "is-selected" : ""} ${isDimmed ? "is-dimmed" : ""}`.trim()}
+                          style={{
+                            left: `${calloutLeft}%`,
+                            top: `${calloutTop}%`,
+                            zIndex: isSelectedBench ? 52 : 8,
+                          }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={() => setSelectedBenchId((prev) => (prev === bench.id ? null : bench.id))}
+                          title={hoverTitle}
+                        >
+                          {bench.id}
+                        </button>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </div>
+            </div>
+            <p className="metric-row">
+              Tips: Click a bench to focus it. Drag empty canvas to pan. Scroll to zoom. Drag the top circular handle to rotate
+              (hold Shift to snap by 15 degrees), and drag the subtle bottom-right corner grip to resize.
+              {isLayoutPlanViewActive
+                ? ` Day overlay reflects ${layoutDayView} allocations from the current plan.`
+                : " Plan overlay is OFF. Switch to a day to preview allocations on benches."}
+            </p>
+            {isLayoutPlanViewActive && showHeatmap ? (
+              <div className="heatmap-legend">
+                <span>Heatmap</span>
+                <div className="heatmap-scale">
+                  <i style={{ backgroundColor: "#19a974" }} />
+                  <i style={{ backgroundColor: "#5dbb63" }} />
+                  <i style={{ backgroundColor: "#e0a100" }} />
+                  <i style={{ backgroundColor: "#e36c0a" }} />
+                  <i style={{ backgroundColor: "#c1373d" }} />
+                </div>
+                <small>Low occupancy</small>
+                <small>High occupancy</small>
+              </div>
+            ) : null}
+            {isLayoutPlanViewActive && selectedBenchDaySummary ? (
+              <p className="metric-row">
+                {selectedBenchDaySummary.bench.id} {layoutDayView}: {selectedBenchDaySummary.summary.usedSeats}/
+                {selectedBenchDaySummary.bench.capacity} used | team {selectedBenchDaySummary.summary.teamSeats} | prealloc{" "}
+                {selectedBenchDaySummary.summary.preallocatedSeats} | flex {selectedBenchDaySummary.summary.flexSeats}
+                {selectedBenchDaySummary.summary.topTeamId ? ` | top team ${selectedBenchDaySummary.summary.topTeamId}` : ""}
+              </p>
+            ) : null}
+          </div>
+
+          <aside className="layout-inspector">
+            <h3>Bench Inspector</h3>
+            {selectedBenchOnFloor ? (
+              <>
+                <p className="metric-row">
+                  <strong>{selectedBenchOnFloor.id}</strong> | {selectedBenchOnFloor.capacity} seats
+                </p>
+                <div className="layout-inspector-grid">
+                  <label>
+                    X (%)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      value={selectedBenchOnFloor.layout ? Number(selectedBenchOnFloor.layout.x.toFixed(1)) : 0}
+                      onChange={(event) => updateSelectedBenchLayout({ x: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    Y (%)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      value={selectedBenchOnFloor.layout ? Number(selectedBenchOnFloor.layout.y.toFixed(1)) : 0}
+                      onChange={(event) => updateSelectedBenchLayout({ y: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    Width (%)
+                    <input
+                      type="number"
+                      min={2}
+                      max={100}
+                      step={0.1}
+                      value={selectedBenchOnFloor.layout ? Number(selectedBenchOnFloor.layout.w.toFixed(1)) : 0}
+                      onChange={(event) => updateSelectedBenchLayout({ w: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    Height (%)
+                    <input
+                      type="number"
+                      min={1.5}
+                      max={100}
+                      step={0.1}
+                      value={selectedBenchOnFloor.layout ? Number(selectedBenchOnFloor.layout.h.toFixed(1)) : 0}
+                      onChange={(event) => updateSelectedBenchLayout({ h: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+                <div className="layout-rotation-controls">
+                  <span>Rotation</span>
+                  <button
+                    onClick={() => updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) - 15)}
+                  >
+                    -15°
+                  </button>
+                  <input
+                    type="number"
+                    min={-180}
+                    max={180}
+                    step={1}
+                    value={selectedBenchOnFloor ? Math.round(Number(selectedBenchOnFloor.layout?.rotation ?? 0)) : 0}
+                    onChange={(event) => updateSelectedBenchRotation(Number(event.target.value))}
+                  />
+                  <button
+                    onClick={() => updateSelectedBenchRotation(Number(selectedBenchOnFloor?.layout?.rotation ?? 0) + 15)}
+                  >
+                    +15°
+                  </button>
+                  <button onClick={() => updateSelectedBenchRotation(0)}>Reset</button>
+                </div>
+              </>
+            ) : (
+              <p className="subtle">Select a bench on the canvas to edit position, size, and rotation.</p>
+            )}
+          </aside>
+        </div>
       </CollapsibleSection>
 
       <CollapsibleSection
         title="Step 3: Teams"
-        description="Set team size, target days, contiguous requirement, preferred days, and optional anchored bench seats."
+        description={`Set teams for ${selectedFloor?.name ?? selectedFloorKey}. Teams are now floor-scoped and cannot be allocated across floors.`}
         defaultOpen={false}
       >
         <table className="teams-input-table">
@@ -3532,17 +4516,17 @@ export default function Page() {
             </tr>
           </thead>
           <tbody>
-            {teams.map((team, index) => (
-              <tr key={`team-${index}`}>
+            {teamsOnSelectedFloorWithIndex.map(({ team, index: teamIndex }) => (
+              <tr key={`team-${teamIndex}`}>
                 <td>
-                  <input value={team.id} onChange={(e) => updateTeam(index, { id: e.target.value })} />
+                  <input value={team.id} onChange={(e) => updateTeam(teamIndex, { id: e.target.value })} />
                 </td>
                 <td className="col-size">
                   <input
                     className="input-size"
                     type="number"
                     value={team.size}
-                    onChange={(e) => updateTeam(index, { size: Number(e.target.value) })}
+                    onChange={(e) => updateTeam(teamIndex, { size: Number(e.target.value) })}
                   />
                 </td>
                 <td>
@@ -3551,7 +4535,7 @@ export default function Page() {
                     min={0}
                     max={5}
                     value={team.targetDays}
-                    onChange={(e) => updateTeam(index, { targetDays: Number(e.target.value) })}
+                    onChange={(e) => updateTeam(teamIndex, { targetDays: Number(e.target.value) })}
                   />
                 </td>
                 <td>
@@ -3559,7 +4543,7 @@ export default function Page() {
                     <input
                       type="checkbox"
                       checked={team.contiguousDaysRequired}
-                      onChange={(e) => updateTeam(index, { contiguousDaysRequired: e.target.checked })}
+                      onChange={(e) => updateTeam(teamIndex, { contiguousDaysRequired: e.target.checked })}
                     />
                     Yes
                   </label>
@@ -3570,19 +4554,19 @@ export default function Page() {
                     onChange={(e) => {
                       const nextAnchorBenchId = e.target.value;
                       if (!nextAnchorBenchId) {
-                        updateTeam(index, { anchorBenchId: "", anchorSeats: 0 });
+                        updateTeam(teamIndex, { anchorBenchId: "", anchorSeats: 0 });
                         return;
                       }
                       const currentAnchorSeats = Math.max(0, Number(team.anchorSeats) || 0);
-                      updateTeam(index, {
+                      updateTeam(teamIndex, {
                         anchorBenchId: nextAnchorBenchId,
                         anchorSeats: currentAnchorSeats > 0 ? currentAnchorSeats : 1,
                       });
                     }}
                   >
                     <option value="">None</option>
-                    {benchesByOrder.map((bench) => (
-                      <option key={`team-anchor-${index}-${bench.id}`} value={bench.id}>
+                    {benchesOnSelectedFloor.map((bench) => (
+                      <option key={`team-anchor-${teamIndex}-${bench.id}`} value={bench.id}>
                         {bench.id}
                       </option>
                     ))}
@@ -3595,7 +4579,7 @@ export default function Page() {
                     max={team.size}
                     value={team.anchorSeats ?? 0}
                     disabled={!team.anchorBenchId}
-                    onChange={(e) => updateTeam(index, { anchorSeats: Math.max(0, Number(e.target.value) || 0) })}
+                    onChange={(e) => updateTeam(teamIndex, { anchorSeats: Math.max(0, Number(e.target.value) || 0) })}
                   />
                 </td>
                 <td>
@@ -3614,15 +4598,15 @@ export default function Page() {
                               : "team-day-none"
                           : "";
                         return (
-                      <label key={`team-${index}-${day}`} className={dayStatusClass}>
+                      <label key={`team-${teamIndex}-${day}`} className={dayStatusClass}>
                         <input
                           type="checkbox"
                           checked={requested}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              updateTeam(index, { preferredDays: [...team.preferredDays, day] });
+                              updateTeam(teamIndex, { preferredDays: [...team.preferredDays, day] });
                             } else {
-                              updateTeam(index, { preferredDays: team.preferredDays.filter((item) => item !== day) });
+                              updateTeam(teamIndex, { preferredDays: team.preferredDays.filter((item) => item !== day) });
                             }
                           }}
                         />
@@ -3634,10 +4618,17 @@ export default function Page() {
                   </div>
                 </td>
                 <td>
-                  <button onClick={() => setTeams((prev) => prev.filter((_, i) => i !== index))}>Delete</button>
+                  <button onClick={() => setTeams((prev) => prev.filter((_, i) => i !== teamIndex))}>Delete</button>
                 </td>
               </tr>
             ))}
+            {teamsOnSelectedFloorWithIndex.length === 0 ? (
+              <tr>
+                <td colSpan={8}>
+                  <span className="subtle">No teams on this floor yet.</span>
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
         <button
@@ -3645,7 +4636,8 @@ export default function Page() {
             setTeams((prev) => [
               ...prev,
               {
-                id: `Team${prev.length + 1}`,
+                id: `Team${prev.filter((team) => resolveTeamFloorId(team, benchFloorById, selectedFloorKey) === selectedFloorKey).length + 1}`,
+                floorId: selectedFloorKey,
                 size: 6,
                 targetDays: 2,
                 preferredDays: ["Tue", "Thu"],
@@ -3662,7 +4654,7 @@ export default function Page() {
 
       <CollapsibleSection
         title="Step 4: Team Proximity Requests"
-        description="Optional: request teams to sit near each other on explicit days. Strict mode treats pairs as one placement group. Red dot = request currently unmet."
+        description={`Optional floor-scoped proximity for ${selectedFloor?.name ?? selectedFloorKey}. Strict mode treats pairs as one placement group. Red dot = request currently unmet.`}
         defaultOpen={false}
       >
         <table>
@@ -3678,7 +4670,7 @@ export default function Page() {
             </tr>
           </thead>
           <tbody>
-            {proximityRequests.map((item, index) => {
+            {proximityRequestsOnSelectedFloorWithIndex.map(({ item, index }) => {
               const status = proximityRequestStatuses[index] ?? { status: "na", unmetDays: [] as Day[] };
               const statusTitle =
                 status.status === "unmet"
@@ -3701,12 +4693,12 @@ export default function Page() {
                     onChange={(event) => updateProximityRequest(index, { teamA: event.target.value })}
                   >
                     <option value="">Select team</option>
-                    {teamOptions.map((teamId) => (
+                    {teamOptionsOnSelectedFloor.map((teamId) => (
                       <option value={teamId} key={`prox-a-${index}-${teamId}`}>
                         {teamId}
                       </option>
                     ))}
-                    {item.teamA && !teamOptions.includes(item.teamA) ? (
+                    {item.teamA && !teamOptionsOnSelectedFloor.includes(item.teamA) ? (
                       <option value={item.teamA}>{item.teamA} (missing)</option>
                     ) : null}
                   </select>
@@ -3717,12 +4709,12 @@ export default function Page() {
                     onChange={(event) => updateProximityRequest(index, { teamB: event.target.value })}
                   >
                     <option value="">Select team</option>
-                    {teamOptions.map((teamId) => (
+                    {teamOptionsOnSelectedFloor.map((teamId) => (
                       <option value={teamId} key={`prox-b-${index}-${teamId}`}>
                         {teamId}
                       </option>
                     ))}
-                    {item.teamB && !teamOptions.includes(item.teamB) ? (
+                    {item.teamB && !teamOptionsOnSelectedFloor.includes(item.teamB) ? (
                       <option value={item.teamB}>{item.teamB} (missing)</option>
                     ) : null}
                   </select>
@@ -3772,6 +4764,13 @@ export default function Page() {
               </tr>
               );
             })}
+            {proximityRequestsOnSelectedFloorWithIndex.length === 0 ? (
+              <tr>
+                <td colSpan={7}>
+                  <span className="subtle">No proximity requests on this floor yet.</span>
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
         <button
@@ -3779,14 +4778,16 @@ export default function Page() {
             setProximityRequests((prev) => [
               ...prev,
               {
-                teamA: teamOptions[0] ?? "",
-                teamB: teamOptions[1] ?? teamOptions[0] ?? "",
+                teamA: teamOptionsOnSelectedFloor[0] ?? "",
+                teamB: teamOptionsOnSelectedFloor[1] ?? teamOptionsOnSelectedFloor[0] ?? "",
+                floorId: selectedFloorKey,
                 strength: 3,
                 strict: false,
                 days: [...DAYS],
               },
             ])
           }
+          disabled={teamOptionsOnSelectedFloor.length === 0}
         >
           Add proximity request
         </button>
@@ -3794,7 +4795,7 @@ export default function Page() {
 
       <CollapsibleSection
         title="Step 5: Pre-allocations"
-        description="Reserve seats by bench/day before planning. Multiple days per row are supported."
+        description={`Reserve seats on ${selectedFloor?.name ?? selectedFloorKey} before planning. Multiple days per row are supported.`}
         defaultOpen={false}
       >
         <table>
@@ -3808,10 +4809,17 @@ export default function Page() {
             </tr>
           </thead>
           <tbody>
-            {preallocations.map((item, index) => (
+            {preallocationsOnSelectedFloorWithIndex.map(({ item, index }) => (
               <tr key={`prealloc-${index}`}>
                 <td>
-                  <input value={item.benchId} onChange={(e) => updatePreallocation(index, { benchId: e.target.value })} />
+                  <select value={item.benchId} onChange={(e) => updatePreallocation(index, { benchId: e.target.value })}>
+                    {benchesOnSelectedFloor.map((bench) => (
+                      <option key={`prealloc-bench-${index}-${bench.id}`} value={bench.id}>
+                        {bench.id}
+                      </option>
+                    ))}
+                    {!benchIdsOnSelectedFloor.has(item.benchId) ? <option value={item.benchId}>{item.benchId} (missing)</option> : null}
+                  </select>
                 </td>
                 <td>
                   <div className="days-inline">
@@ -3849,15 +4857,28 @@ export default function Page() {
                 </td>
               </tr>
             ))}
+            {preallocationsOnSelectedFloorWithIndex.length === 0 ? (
+              <tr>
+                <td colSpan={5}>
+                  <span className="subtle">No pre-allocations on this floor yet.</span>
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
         <button
           onClick={() =>
             setPreallocations((prev) => [
               ...prev,
-              { benchId: benchesByOrder[0]?.id ?? "B1", days: ["Mon"], seats: 1, label: "Reserved" },
+              {
+                benchId: benchesOnSelectedFloor[0]?.id ?? ensureFloorQualifiedBenchId("B1", selectedFloorKey),
+                days: ["Mon"],
+                seats: 1,
+                label: "Reserved",
+              },
             ])
           }
+          disabled={benchesOnSelectedFloor.length === 0}
         >
           Add pre-allocation
         </button>
@@ -3873,23 +4894,27 @@ export default function Page() {
 
       {result ? (
         <>
+          <section className="panel result-scope-panel">
+            <label>
+              Result scope
+              <select value={normalizedResultFloorScopeId} onChange={(event) => setResultFloorScopeId(event.target.value)}>
+                <option value={OUTPUT_SCOPE_ALL}>All floors</option>
+                {allKnownFloorIds.map((floorId) => (
+                  <option key={`result-scope-${floorId}`} value={floorId}>
+                    {floorNameById.get(floorId) ?? floorId}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="metric-row">Bench table, diagnostics, daily usage, CSV exports, and PDF use this scope.</p>
+          </section>
+
           <CollapsibleSection
-            className="grid-two"
-            title="Share, Export & Manual Adjustments"
-            description="Export current table state and drag chips to fine-tune."
+            title="Manual Adjustments"
+            description="Drag chips across cells to fine-tune the generated plan."
             defaultOpen
           >
             <div>
-              <h3>Share & Export</h3>
-              <p className="subtle">Export current table state, including manual adjustments.</p>
-              <div className="export-actions">
-                <button onClick={exportBenchPlanCsv}>Export bench x day CSV</button>
-                <button onClick={exportTeamViewCsv}>Export team view CSV</button>
-                <button onClick={exportBenchPlanA4Pdf}>Export Bench x Day A4 PDF</button>
-              </div>
-            </div>
-            <div>
-              <h3>Manual Adjustments</h3>
               <p className="subtle">Drag allocation chips across cells to fine-tune the plan.</p>
               <p className="subtle">If a cell is full, drop on a specific chip to swap allocations.</p>
               <p className="subtle">Click a chip then use Arrow keys to move it. Press Esc to cancel drag or clear selection.</p>
@@ -3906,7 +4931,7 @@ export default function Page() {
 
           <CollapsibleSection
             title="Bench x Day Plan"
-            description={`Primary mode: ${result.primary.diagnostics.mode}`}
+            description={`Primary mode: ${result.primary.diagnostics.mode} | Scope: ${resultScopeLabel}`}
             defaultOpen
           >
             <p className="metric-row highlight-status">
@@ -3928,20 +4953,27 @@ export default function Page() {
                 Strict proximity auto-relaxed for: {result.primary.diagnostics.strictProximityRelaxations.join(" | ")}.
               </p>
             ) : null}
+            {benchesInResultScope.length === 0 ? (
+              <p className="warning">No benches found in this output scope.</p>
+            ) : null}
             <div className="plan-table-wrap is-compact">
               <table className="plan-table">
                 <thead>
                   <tr>
-                    <th>Bench (Seats)</th>
+                    <th>{normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? "Floor / Bench (Seats)" : "Bench (Seats)"}</th>
                     {DAYS.map((day) => (
                       <th key={day}>{day}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {benchesByOrder.map((bench) => (
+                  {benchesInResultScope.map((bench) => {
+                    const floorId = normalizeFloorId(bench.floorId, selectedFloorKey);
+                    const floorLabel = floorNameById.get(floorId) ?? floorId;
+                    return (
                     <tr key={bench.id}>
                       <td>
+                        {normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? <span className="subtle">{floorLabel} / </span> : null}
                         <strong>{bench.id}</strong> ({bench.capacity})
                       </td>
                       {DAYS.map((day) => {
@@ -4070,7 +5102,8 @@ export default function Page() {
                                         if (item.kind !== "team" || !item.teamId) {
                                           return;
                                         }
-                                        setSelectedTeamId((prev) => (prev === item.teamId ? null : item.teamId));
+                                        const teamId = item.teamId;
+                                        setSelectedTeamId((prev) => (prev === teamId ? null : teamId));
                                       }}
                                       style={style}
                                     >
@@ -4092,7 +5125,8 @@ export default function Page() {
                         );
                       })}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -4106,6 +5140,7 @@ export default function Page() {
             <div>
               <h3>Team Outcomes</h3>
               <p className="subtle">Fulfillment, unmet demand, and Monday/Friday rule.</p>
+              <p className="subtle">Scope: {resultScopeLabel}</p>
               <p className="subtle">
                 Day colors: <span className="team-day-chip team-day-match">requested + assigned</span>{" "}
                 <span className="team-day-chip team-day-request-only">requested only</span>{" "}
@@ -4128,7 +5163,7 @@ export default function Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.primary.diagnostics.teamDiagnostics.map((row) => {
+                  {primaryTeamDiagnosticsInResultScope.map((row) => {
                     const requestedDays = new Set(teamRequirementMap.get(row.teamId)?.preferredDays ?? []);
                     const assignedDays = assignedDaysByTeam.get(row.teamId) ?? new Set<Day>();
                     return (
@@ -4165,6 +5200,13 @@ export default function Page() {
                     </tr>
                     );
                   })}
+                  {primaryTeamDiagnosticsInResultScope.length === 0 ? (
+                    <tr>
+                      <td colSpan={10}>
+                        <span className="subtle">No teams in this scope.</span>
+                      </td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
@@ -4184,7 +5226,7 @@ export default function Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {teamDelta.map((row) => (
+                  {teamDeltaInResultScope.map((row) => (
                     <tr key={row.teamId}>
                       <td>{row.teamId}</td>
                       <td>{row.primaryDays}</td>
@@ -4192,10 +5234,17 @@ export default function Page() {
                       <td>{row.delta > 0 ? `+${row.delta}` : row.delta}</td>
                     </tr>
                   ))}
+                  {teamDeltaInResultScope.length === 0 ? (
+                    <tr>
+                      <td colSpan={4}>
+                        <span className="subtle">No teams in this scope.</span>
+                      </td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
-              <p className="metric-row">Min fairness ratio: {result.primary.diagnostics.fairnessMinRatio.toFixed(2)}</p>
-              <p className="metric-row">Contiguity penalty: {result.primary.diagnostics.contiguityPenalty}</p>
+              <p className="metric-row">Min fairness ratio: {scopedPrimaryFairnessMin.toFixed(2)}</p>
+              <p className="metric-row">Contiguity penalty: {scopedContiguityPenalty}</p>
             </div>
           </CollapsibleSection>
 
@@ -4205,10 +5254,12 @@ export default function Page() {
               description="Why this plan was selected and what tradeoffs were made."
               defaultOpen={false}
             >
+              <p className="metric-row">Scope: {resultScopeLabel}</p>
               <p className="metric-row">
-                Primary fairness min ratio: {explainability.diagnostics.fairnessMinRatio.toFixed(2)} | Comparison min ratio:{" "}
-                {explainability.comparison.fairnessMinRatio.toFixed(2)}
+                Primary fairness min ratio: {explainability.scopedPrimaryMinRatio.toFixed(2)} | Comparison min ratio:{" "}
+                {explainability.scopedComparisonMinRatio.toFixed(2)}
               </p>
+              <p className="metric-row">Contiguity penalty: {explainability.scopedContiguityPenalty}</p>
               {explainability.diagnostics.relaxedApplied ? (
                 <p className="warning">
                   Auto-relax was applied because exact full-day targets were infeasible with current capacity and pre-allocations.
@@ -4244,6 +5295,7 @@ export default function Page() {
             description="Allocated seats, preallocated seats, and flex seats allocated from leftover capacity."
             defaultOpen={false}
           >
+            <p className="metric-row">Scope: {resultScopeLabel}</p>
             <table>
               <thead>
                 <tr>
@@ -4271,26 +5323,31 @@ export default function Page() {
           </CollapsibleSection>
 
           <section
-            className={`bench-print-sheet ${benchesByOrder.length >= 28 ? "is-many-rows" : benchesByOrder.length <= 12 ? "is-few-rows" : ""}`.trim()}
+            className={`bench-print-sheet ${benchesInResultScope.length >= 28 ? "is-many-rows" : benchesInResultScope.length <= 12 ? "is-few-rows" : ""}`.trim()}
             aria-hidden="true"
           >
             <div className="bench-print-head">
-              <h1>Bench x Day Plan - {activeScenario?.name?.trim() || "Scenario"}</h1>
+              <h1>
+                Bench x Day Plan - {activeScenario?.name?.trim() || "Scenario"} ({resultScopeLabel})
+              </h1>
               <p>{printGeneratedAt ? `Generated ${printGeneratedAt}` : ""}</p>
             </div>
             <table className="bench-print-table">
               <thead>
                 <tr>
-                  <th>Bench (Seats)</th>
+                  <th>{normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL ? "Floor / Bench (Seats)" : "Bench (Seats)"}</th>
                   {DAYS.map((day) => (
                     <th key={`print-${day}`}>{day}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {benchesByOrder.map((bench) => (
+                {benchesInResultScope.map((bench) => (
                   <tr key={`print-row-${bench.id}`}>
                     <th>
+                      {normalizedResultFloorScopeId === OUTPUT_SCOPE_ALL
+                        ? `${floorNameById.get(normalizeFloorId(bench.floorId, selectedFloorKey)) ?? normalizeFloorId(bench.floorId, selectedFloorKey)} / `
+                        : ""}
                       {bench.id} ({bench.capacity})
                     </th>
                     {DAYS.map((day) => {

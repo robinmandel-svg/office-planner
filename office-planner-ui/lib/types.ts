@@ -26,6 +26,7 @@ export type Preallocation = {
 
 export type Team = {
   id: string;
+  floorId?: string;
   size: number;
   targetDays: number;
   preferredDays: Day[];
@@ -43,6 +44,7 @@ export type FlexPolicy = {
 export type TeamProximityRequest = {
   teamA: string;
   teamB: string;
+  floorId?: string;
   strength: number;
   strict?: boolean;
   days?: Day[];

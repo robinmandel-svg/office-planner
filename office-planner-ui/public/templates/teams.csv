@@ -1,4 +1,4 @@
-id,size,target_days,preferred_days,contiguous_days_required,anchor_bench_id,anchor_seats
-Engineering,12,3,Tue;Wed;Thu,false,B1,2
-Sales,8,3,Tue;Thu,false,,
-Finance,5,2,Mon;Fri,true,B3,1
+id,floor_id,size,target_days,preferred_days,contiguous_days_required,anchor_bench_id,anchor_seats
+Engineering,F1,12,3,Tue;Wed;Thu,false,F1-B1,2
+Sales,F1,8,3,Tue;Thu,false,,
+Finance,F1,5,2,Mon;Fri,true,F1-B3,1
