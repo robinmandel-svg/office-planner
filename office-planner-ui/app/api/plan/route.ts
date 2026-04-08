@@ -125,6 +125,13 @@ function validateInput(raw: PlannerInput): string[] {
     errors.push("benchStabilityWeight must be between 0 and 10.");
   }
 
+  if (
+    raw.monFriPairPenaltyWeight !== undefined &&
+    (raw.monFriPairPenaltyWeight < 0 || raw.monFriPairPenaltyWeight > 100)
+  ) {
+    errors.push("monFriPairPenaltyWeight must be between 0 and 100.");
+  }
+
   if (raw.proximityRequests) {
     for (const request of raw.proximityRequests) {
       if (!request.teamA || !request.teamB) {

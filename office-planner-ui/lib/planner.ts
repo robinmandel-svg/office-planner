@@ -58,6 +58,25 @@ function includesMonFri(days: Day[]): boolean {
   return days.some(dayIsMonFri);
 }
 
+function hasMonFriPair(days: Iterable<Day>): boolean {
+  let hasMon = false;
+  let hasFri = false;
+  for (const day of days) {
+    if (day === MON) {
+      hasMon = true;
+    }
+    if (day === FRI) {
+      hasFri = true;
+    }
+  }
+  return hasMon && hasFri;
+}
+
+function monFriPairPenaltyWeight(input: PlannerInput, mode: SolverMode): number {
+  const modeDefault = mode === "fairness_first" ? 45 : 30;
+  return clamp(Number(input.monFriPairPenaltyWeight ?? modeDefault), 0, 100);
+}
+
 function teamAnchorBenchId(team: Team): string | null {
   const anchorBenchId = (team.anchorBenchId ?? "").trim();
   return anchorBenchId.length > 0 ? anchorBenchId : null;
@@ -234,14 +253,17 @@ function scoreExactState(
   remaining: DayMap<number>,
   dayCap: DayMap<number>,
   prefScore: number,
+  monFriPairCount: number,
+  monFriPairPenalty: number,
   mode: SolverMode,
 ): number {
   const used = DAYS.map((day) => dayCap[day] - remaining[day]);
   const balancePenalty = variance(used);
+  const monFriPenalty = monFriPairCount * monFriPairPenalty;
   if (mode === "efficiency_first") {
-    return prefScore * 20 - balancePenalty;
+    return prefScore * 20 - balancePenalty - monFriPenalty;
   }
-  return prefScore * 25 - balancePenalty * 1.5;
+  return prefScore * 25 - balancePenalty * 1.5 - monFriPenalty;
 }
 
 function cloneAssignments(assignments: AssignmentMap): AssignmentMap {
@@ -265,6 +287,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
   });
 
   const dayCap = capacity.dayCapacity;
+  const monFriPenalty = monFriPairPenaltyWeight(input, mode);
   const BEAM_WIDTH = 300;
 
   type BeamState = {
@@ -272,6 +295,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
     anchorRemaining: BenchAvailabilityByDay;
     assignments: AssignmentMap;
     prefScore: number;
+    monFriPairCount: number;
     score: number;
   };
 
@@ -281,6 +305,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
       anchorRemaining: cloneBenchAvailability(capacity.benchAvailability),
       assignments: {},
       prefScore: 0,
+      monFriPairCount: 0,
       score: 0,
     },
   ];
@@ -333,8 +358,9 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
         assignments[team.id] = new Set(option);
 
         const prefScore = state.prefScore + preferredHits(option, team);
-        const score = scoreExactState(remaining, dayCap, prefScore, mode);
-        nextBeam.push({ remaining, anchorRemaining, assignments, prefScore, score });
+        const monFriPairCount = state.monFriPairCount + (hasMonFriPair(option) ? 1 : 0);
+        const score = scoreExactState(remaining, dayCap, prefScore, monFriPairCount, monFriPenalty, mode);
+        nextBeam.push({ remaining, anchorRemaining, assignments, prefScore, monFriPairCount, score });
       }
     }
 
@@ -365,6 +391,7 @@ function chooseDayForTeam(
   anchorRemaining: BenchAvailabilityByDay,
   dayCap: DayMap<number>,
   mode: SolverMode,
+  monFriPairPenalty: number,
 ): Day | null {
   const anchorBenchId = teamAnchorBenchId(team);
   const anchorSeats = teamAnchorSeats(team);
@@ -393,6 +420,9 @@ function chooseDayForTeam(
     }
     if (!hasMonFri && dayIsMonFri(day)) {
       score += 35;
+    }
+    if (hasMonFri && dayIsMonFri(day)) {
+      score -= monFriPairPenalty;
     }
 
     const usedPct = dayCap[day] > 0 ? (dayCap[day] - remaining[day]) / dayCap[day] : 1;
@@ -484,6 +514,7 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
   const assignments = initAssignments(input.teams);
   const remaining: DayMap<number> = { ...capacity.dayCapacity };
   const anchorRemaining = cloneBenchAvailability(capacity.benchAvailability);
+  const monFriPenalty = monFriPairPenaltyWeight(input, mode);
   const maxTarget = Math.max(0, ...input.teams.map((team) => team.targetDays));
 
   for (let round = 1; round <= maxTarget; round += 1) {
@@ -511,7 +542,15 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
       if (assigned.size >= team.targetDays) {
         continue;
       }
-      const chosenDay = chooseDayForTeam(team, assigned, remaining, anchorRemaining, capacity.dayCapacity, mode);
+      const chosenDay = chooseDayForTeam(
+        team,
+        assigned,
+        remaining,
+        anchorRemaining,
+        capacity.dayCapacity,
+        mode,
+        monFriPenalty,
+      );
       if (!chosenDay) {
         continue;
       }
@@ -1084,6 +1123,7 @@ function buildTeamDiagnostics(teams: Team[], assignments: AssignmentMap): TeamDi
     const assignedDays = days.size;
     const unmetDays = Math.max(0, team.targetDays - assignedDays);
     const fulfillmentRatio = team.targetDays > 0 ? assignedDays / team.targetDays : 1;
+    const monFriPairAssigned = hasMonFriPair(days);
     return {
       teamId: team.id,
       targetDays: team.targetDays,
@@ -1092,6 +1132,7 @@ function buildTeamDiagnostics(teams: Team[], assignments: AssignmentMap): TeamDi
       fulfillmentRatio,
       preferredHits: preferredHits(days, team),
       monFriSatisfied: [...days].some(dayIsMonFri),
+      monFriPairAssigned,
     };
   });
 }
@@ -1144,6 +1185,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
   const dayDiagnostics = buildDayDiagnostics(allocations, flexAllocations, capacity);
   const fairnessMinRatio = teamDiagnostics.reduce((min, row) => Math.min(min, row.fulfillmentRatio), 1);
   const totalFulfilledDays = teamDiagnostics.reduce((acc, row) => acc + row.assignedDays, 0);
+  const monFriPairAssignedTeams = teamDiagnostics.filter((row) => row.monFriPairAssigned).length;
 
   return {
     allocations,
@@ -1156,6 +1198,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
       fairnessMinRatio,
       totalFulfilledDays,
       contiguityPenalty,
+      monFriPairAssignedTeams,
       strictProximityRelaxations,
       teamDiagnostics,
       dayDiagnostics,
@@ -1215,6 +1258,7 @@ function mergePlanResults(mode: SolverMode, plans: PlanResult[]): PlanResult {
       ? teamDiagnostics.reduce((min, row) => Math.min(min, row.fulfillmentRatio), 1)
       : 1;
   const totalFulfilledDays = teamDiagnostics.reduce((acc, row) => acc + row.assignedDays, 0);
+  const monFriPairAssignedTeams = teamDiagnostics.filter((row) => row.monFriPairAssigned).length;
 
   return {
     allocations,
@@ -1227,6 +1271,7 @@ function mergePlanResults(mode: SolverMode, plans: PlanResult[]): PlanResult {
       fairnessMinRatio,
       totalFulfilledDays,
       contiguityPenalty: plans.reduce((acc, planPart) => acc + planPart.diagnostics.contiguityPenalty, 0),
+      monFriPairAssignedTeams,
       strictProximityRelaxations: plans.flatMap((planPart) => planPart.diagnostics.strictProximityRelaxations),
       teamDiagnostics,
       dayDiagnostics,
@@ -1289,6 +1334,7 @@ export function plan(input: PlannerInput): PlannerResponse {
       solverMode: input.solverMode,
       proximityRequests: floorProximity,
       benchStabilityWeight: input.benchStabilityWeight,
+      monFriPairPenaltyWeight: input.monFriPairPenaltyWeight,
     };
   });
 

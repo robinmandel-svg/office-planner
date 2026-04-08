@@ -58,6 +58,7 @@ export type PlannerInput = {
   solverMode: SolverMode;
   proximityRequests?: TeamProximityRequest[];
   benchStabilityWeight?: number;
+  monFriPairPenaltyWeight?: number;
 };
 
 export type TeamSchedule = {
@@ -86,6 +87,7 @@ export type TeamDiagnostics = {
   fulfillmentRatio: number;
   preferredHits: number;
   monFriSatisfied: boolean;
+  monFriPairAssigned: boolean;
 };
 
 export type DayDiagnostics = {
@@ -104,6 +106,7 @@ export type PlanDiagnostics = {
   fairnessMinRatio: number;
   totalFulfilledDays: number;
   contiguityPenalty: number;
+  monFriPairAssignedTeams: number;
   strictProximityRelaxations: string[];
   teamDiagnostics: TeamDiagnostics[];
   dayDiagnostics: DayDiagnostics[];

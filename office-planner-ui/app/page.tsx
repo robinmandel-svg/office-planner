@@ -65,6 +65,7 @@ type SessionConfigFile = {
     flexDefault?: number;
     flexOverrides?: FlexOverrides;
     benchStabilityWeight?: number;
+    monFriPairPenaltyWeight?: number;
     proximityRequests?: TeamProximityRequest[];
   };
 };
@@ -82,6 +83,7 @@ type ScenarioConfigEntry = {
     flexDefault?: number;
     flexOverrides?: FlexOverrides;
     benchStabilityWeight?: number;
+    monFriPairPenaltyWeight?: number;
     proximityRequests?: TeamProximityRequest[];
   };
 };
@@ -98,6 +100,7 @@ type PlannerScenario = {
   flexDefault: number;
   flexOverrides: FlexOverrides;
   benchStabilityWeight: number;
+  monFriPairPenaltyWeight: number;
   proximityRequests: TeamProximityRequest[];
 };
 
@@ -496,6 +499,7 @@ function scenarioToConfigEntry(scenario: PlannerScenario): ScenarioConfigEntry {
       flexDefault: scenario.flexDefault,
       flexOverrides: { ...scenario.flexOverrides },
       benchStabilityWeight: scenario.benchStabilityWeight,
+      monFriPairPenaltyWeight: scenario.monFriPairPenaltyWeight,
       proximityRequests: cloneProximity(scenario.proximityRequests),
     },
   };
@@ -514,6 +518,7 @@ function createInitialScenario(): PlannerScenario {
     flexDefault: 10,
     flexOverrides: {},
     benchStabilityWeight: 6,
+    monFriPairPenaltyWeight: 45,
     proximityRequests: cloneProximity(initialProximityRequests),
   };
 }
@@ -757,6 +762,7 @@ export default function Page() {
   const [selectedBenchId, setSelectedBenchId] = useState<string | null>(null);
   const [flexDefault, setFlexDefault] = useState<number>(10);
   const [benchStabilityWeight, setBenchStabilityWeight] = useState<number>(6);
+  const [monFriPairPenaltyWeight, setMonFriPairPenaltyWeight] = useState<number>(45);
   const [flexOverrides, setFlexOverrides] = useState<FlexOverrides>({});
   const [solverMode, setSolverMode] = useState<"fairness_first" | "efficiency_first">("fairness_first");
   const [result, setResult] = useState<PlannerResponse | null>(null);
@@ -1018,6 +1024,7 @@ export default function Page() {
       flexDefault: Number(flexDefault),
       flexOverrides: { ...flexOverrides },
       benchStabilityWeight: Number(benchStabilityWeight),
+      monFriPairPenaltyWeight: Number(monFriPairPenaltyWeight),
       proximityRequests: cloneProximity(proximityRequests),
     }),
     [
@@ -1026,6 +1033,7 @@ export default function Page() {
       flexDefault,
       flexOverrides,
       floors,
+      monFriPairPenaltyWeight,
       preallocations,
       proximityRequests,
       selectedFloorId,
@@ -1046,6 +1054,7 @@ export default function Page() {
     setFlexDefault(scenario.flexDefault);
     setFlexOverrides({ ...scenario.flexOverrides });
     setBenchStabilityWeight(scenario.benchStabilityWeight);
+    setMonFriPairPenaltyWeight(scenario.monFriPairPenaltyWeight);
     setProximityRequests(cloneProximity(scenario.proximityRequests));
     setLayoutView({ scale: 1, offsetX: 0, offsetY: 0 });
     setLayoutDayView("off");
@@ -1982,12 +1991,13 @@ export default function Page() {
 
     const policyFlexInvalid = Number(flexDefault) < 0 || Number(flexDefault) > 100;
     const policyBenchStabilityInvalid = Number(benchStabilityWeight) < 0 || Number(benchStabilityWeight) > 10;
-    if (policyFlexInvalid || policyBenchStabilityInvalid) {
+    const policyMonFriPenaltyInvalid = Number(monFriPairPenaltyWeight) < 0 || Number(monFriPairPenaltyWeight) > 100;
+    if (policyFlexInvalid || policyBenchStabilityInvalid || policyMonFriPenaltyInvalid) {
       issues.push({
         id: "policy-invalid",
         scope: "step0",
         level: "error",
-        message: "Policy has out-of-range values (flex must be 0-100, stability 0-10).",
+        message: "Policy has out-of-range values (flex 0-100, stability 0-10, Mon+Fri penalty 0-100).",
         fixCode: "normalize_policy",
         fixLabel: "Normalize policy",
       });
@@ -2032,6 +2042,7 @@ export default function Page() {
     flexDefault,
     floors,
     manualUsageWarnings,
+    monFriPairPenaltyWeight,
     preallocations,
     proximityRequestStatuses,
     proximityRequests,
@@ -2437,6 +2448,7 @@ export default function Page() {
     if (fixCode === "normalize_policy") {
       setFlexDefault((prev) => clamp(Number(prev) || 0, 0, 100));
       setBenchStabilityWeight((prev) => clamp(Number(prev) || 0, 0, 10));
+      setMonFriPairPenaltyWeight((prev) => clamp(Number(prev) || 0, 0, 100));
       return;
     }
 
@@ -2993,6 +3005,7 @@ export default function Page() {
           flexDefault: clamp(Number(settings.flexDefault ?? 10), 0, 100),
           flexOverrides: nextFlexOverrides,
           benchStabilityWeight: clamp(Number(settings.benchStabilityWeight ?? 6), 0, 10),
+          monFriPairPenaltyWeight: clamp(Number(settings.monFriPairPenaltyWeight ?? 45), 0, 100),
           proximityRequests: normalizeConfigProximity(
             settings.proximityRequests,
             teamFloorById,
@@ -3022,6 +3035,7 @@ export default function Page() {
         flexDefault: Number(flexDefault),
         flexOverrides: { ...flexOverrides },
         benchStabilityWeight: Number(benchStabilityWeight),
+        monFriPairPenaltyWeight: Number(monFriPairPenaltyWeight),
         proximityRequests: cloneProximity(proximityRequests),
       },
     };
@@ -3408,6 +3422,7 @@ export default function Page() {
           days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
         })),
       benchStabilityWeight: Math.max(0, Math.min(10, Number(benchStabilityWeight) || 0)),
+      monFriPairPenaltyWeight: Math.max(0, Math.min(100, Number(monFriPairPenaltyWeight) || 0)),
     };
   }
 
@@ -4066,6 +4081,16 @@ export default function Page() {
               max={10}
               value={benchStabilityWeight}
               onChange={(e) => setBenchStabilityWeight(Number(e.target.value))}
+            />
+          </label>
+          <label>
+            Mon+Fri pair penalty (0-100)
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={monFriPairPenaltyWeight}
+              onChange={(e) => setMonFriPairPenaltyWeight(Number(e.target.value))}
             />
           </label>
           <p className={paletteAudit.ok ? "metric-row" : "warning"}>
@@ -4945,6 +4970,10 @@ export default function Page() {
             </p>
             <p className="metric-row fixed-status">FIXED chips are pre-allocated seats and cannot be moved.</p>
             <p className="metric-row">Bench stability preference weight: {benchStabilityWeight}/10.</p>
+            <p className="metric-row">Mon+Fri pair penalty weight: {monFriPairPenaltyWeight}/100.</p>
+            <p className="metric-row">
+              Teams assigned on both Mon and Fri: {result.primary.diagnostics.monFriPairAssignedTeams}
+            </p>
             {result.primary.diagnostics.relaxedApplied ? (
               <p className="warning">Exact targets were infeasible. Auto-relax was applied and unmet demand is shown below.</p>
             ) : null}
@@ -5159,6 +5188,7 @@ export default function Page() {
                     <th>Contiguous req</th>
                     <th>Contiguous met</th>
                     <th>Mon/Fri</th>
+                    <th>Mon+Fri pair</th>
                     <th>Days (Req vs Assigned)</th>
                   </tr>
                 </thead>
@@ -5177,6 +5207,7 @@ export default function Page() {
                       <td>{teamRequirementMap.get(row.teamId)?.contiguousDaysRequired ? "Yes" : "No"}</td>
                       <td>{teamContiguousStatus.get(row.teamId) ? "Yes" : "No"}</td>
                       <td>{row.monFriSatisfied ? "Yes" : "No"}</td>
+                      <td>{row.monFriPairAssigned ? "Yes" : "No"}</td>
                       <td>
                         <div className="team-day-row">
                           {DAYS.map((day) => {
@@ -5202,7 +5233,7 @@ export default function Page() {
                   })}
                   {primaryTeamDiagnosticsInResultScope.length === 0 ? (
                     <tr>
-                      <td colSpan={10}>
+                      <td colSpan={11}>
                         <span className="subtle">No teams in this scope.</span>
                       </td>
                     </tr>
