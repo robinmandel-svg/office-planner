@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 .venv/
+
+# macOS
+.DS_Store
+
+# Keep this repo focused on office planner work
+defense-site-prototype/
+gallium-defense-site/
+movie-watch-notifications/
+WatchNotifTest/
+
+# Next.js generated artifacts
+office-planner-ui/node_modules/
+office-planner-ui/.next/
+office-planner-ui/.next-stale-*/
+office-planner-ui/tsconfig.tsbuildinfo
