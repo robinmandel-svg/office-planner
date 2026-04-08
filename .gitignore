@@ -1,15 +1,14 @@
+# Track only office planner files from this parent workspace repo.
+/*
+!/.gitignore
+!/office-planner-ui/
+!/office-planner-ui/**
+
+# macOS / Python noise
+.DS_Store
 __pycache__/
 *.pyc
 .venv/
-
-# macOS
-.DS_Store
-
-# Keep this repo focused on office planner work
-defense-site-prototype/
-gallium-defense-site/
-movie-watch-notifications/
-WatchNotifTest/
 
 # Next.js generated artifacts
 office-planner-ui/node_modules/
