@@ -66,6 +66,7 @@ type SessionConfigFile = {
     flexOverrides?: FlexOverrides;
     benchStabilityWeight?: number;
     monFriPairPenaltyWeight?: number;
+    allowedSeatShortfallPerTeamDay?: number;
     proximityRequests?: TeamProximityRequest[];
   };
 };
@@ -84,6 +85,7 @@ type ScenarioConfigEntry = {
     flexOverrides?: FlexOverrides;
     benchStabilityWeight?: number;
     monFriPairPenaltyWeight?: number;
+    allowedSeatShortfallPerTeamDay?: number;
     proximityRequests?: TeamProximityRequest[];
   };
 };
@@ -101,6 +103,7 @@ type PlannerScenario = {
   flexOverrides: FlexOverrides;
   benchStabilityWeight: number;
   monFriPairPenaltyWeight: number;
+  allowedSeatShortfallPerTeamDay: number;
   proximityRequests: TeamProximityRequest[];
 };
 
@@ -358,6 +361,21 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function normalizeAllowedSeatShortfall(value: number): number {
+  return clamp(Math.round(Number(value) || 0), 0, 10);
+}
+
+function requiredSeatsForTeam(team: Team, allowedSeatShortfallPerTeamDay: number): number {
+  const size = Math.max(0, Number(team.size) || 0);
+  if (size <= 0) {
+    return 0;
+  }
+  const normalizedShortfall = normalizeAllowedSeatShortfall(allowedSeatShortfallPerTeamDay);
+  const anchorSeats = Math.max(0, Number(team.anchorSeats) || 0);
+  const baseRequired = clamp(size - normalizedShortfall, 1, size);
+  return Math.max(baseRequired, anchorSeats);
+}
+
 function defaultLayoutForIndex(index: number) {
   const col = index % 4;
   const row = Math.floor(index / 4);
@@ -500,6 +518,7 @@ function scenarioToConfigEntry(scenario: PlannerScenario): ScenarioConfigEntry {
       flexOverrides: { ...scenario.flexOverrides },
       benchStabilityWeight: scenario.benchStabilityWeight,
       monFriPairPenaltyWeight: scenario.monFriPairPenaltyWeight,
+      allowedSeatShortfallPerTeamDay: scenario.allowedSeatShortfallPerTeamDay,
       proximityRequests: cloneProximity(scenario.proximityRequests),
     },
   };
@@ -518,7 +537,8 @@ function createInitialScenario(): PlannerScenario {
     flexDefault: 10,
     flexOverrides: {},
     benchStabilityWeight: 6,
-    monFriPairPenaltyWeight: 45,
+    monFriPairPenaltyWeight: 120,
+    allowedSeatShortfallPerTeamDay: 0,
     proximityRequests: cloneProximity(initialProximityRequests),
   };
 }
@@ -762,7 +782,8 @@ export default function Page() {
   const [selectedBenchId, setSelectedBenchId] = useState<string | null>(null);
   const [flexDefault, setFlexDefault] = useState<number>(10);
   const [benchStabilityWeight, setBenchStabilityWeight] = useState<number>(6);
-  const [monFriPairPenaltyWeight, setMonFriPairPenaltyWeight] = useState<number>(45);
+  const [monFriPairPenaltyWeight, setMonFriPairPenaltyWeight] = useState<number>(120);
+  const [allowedSeatShortfallPerTeamDay, setAllowedSeatShortfallPerTeamDay] = useState<number>(0);
   const [flexOverrides, setFlexOverrides] = useState<FlexOverrides>({});
   const [solverMode, setSolverMode] = useState<"fairness_first" | "efficiency_first">("fairness_first");
   const [result, setResult] = useState<PlannerResponse | null>(null);
@@ -928,6 +949,13 @@ export default function Page() {
     () => evaluatePaletteSeparation(TEAM_BASE_COLORS, Math.max(30, teamOptions.length), 20),
     [teamOptions.length],
   );
+  const requiredSeatsByTeam = useMemo(() => {
+    const map = new Map<string, number>();
+    teams.forEach((team) => {
+      map.set(team.id, requiredSeatsForTeam(team, allowedSeatShortfallPerTeamDay));
+    });
+    return map;
+  }, [allowedSeatShortfallPerTeamDay, teams]);
   const preallocationItems = useMemo(() => flattenPreallocations(preallocations), [preallocations]);
   const benchIdsOnSelectedFloor = useMemo(() => new Set(benchesOnSelectedFloor.map((bench) => bench.id)), [benchesOnSelectedFloor]);
   const preallocationsOnSelectedFloorWithIndex = useMemo(
@@ -976,7 +1004,10 @@ export default function Page() {
         .reduce((acc, item) => acc + item.seats, 0);
       const teamsInFloor = teams.filter((team) => resolveTeamFloorId(team, benchFloorById, floorId) === floorId);
       const teamHeadcount = teamsInFloor.reduce((acc, team) => acc + team.size, 0);
-      const demandSeatDays = teamsInFloor.reduce((acc, team) => acc + team.size * team.targetDays, 0);
+      const demandSeatDays = teamsInFloor.reduce(
+        (acc, team) => acc + (requiredSeatsByTeam.get(team.id) ?? team.size) * team.targetDays,
+        0,
+      );
       const anchoredTeams = teamsInFloor.filter((team) => (team.anchorBenchId ?? "").trim().length > 0).length;
       const proximityRows = proximityRequests.filter((request) => {
         const requestFloorId =
@@ -1003,7 +1034,7 @@ export default function Page() {
         demandRatio,
       };
     });
-  }, [benchFloorById, benches, benchesByOrder, floors, preallocationItems, proximityRequests, teamFloorById, teams]);
+  }, [benchFloorById, benches, benchesByOrder, floors, preallocationItems, proximityRequests, requiredSeatsByTeam, teamFloorById, teams]);
   const selectedFloorConstraints =
     floorConstraintRows.find((row) => row.floorId === selectedFloorKey) ?? floorConstraintRows[0] ?? null;
 
@@ -1025,6 +1056,7 @@ export default function Page() {
       flexOverrides: { ...flexOverrides },
       benchStabilityWeight: Number(benchStabilityWeight),
       monFriPairPenaltyWeight: Number(monFriPairPenaltyWeight),
+      allowedSeatShortfallPerTeamDay: Number(allowedSeatShortfallPerTeamDay),
       proximityRequests: cloneProximity(proximityRequests),
     }),
     [
@@ -1034,6 +1066,7 @@ export default function Page() {
       flexOverrides,
       floors,
       monFriPairPenaltyWeight,
+      allowedSeatShortfallPerTeamDay,
       preallocations,
       proximityRequests,
       selectedFloorId,
@@ -1055,6 +1088,7 @@ export default function Page() {
     setFlexOverrides({ ...scenario.flexOverrides });
     setBenchStabilityWeight(scenario.benchStabilityWeight);
     setMonFriPairPenaltyWeight(scenario.monFriPairPenaltyWeight);
+    setAllowedSeatShortfallPerTeamDay(scenario.allowedSeatShortfallPerTeamDay);
     setProximityRequests(cloneProximity(scenario.proximityRequests));
     setLayoutView({ scale: 1, offsetX: 0, offsetY: 0 });
     setLayoutDayView("off");
@@ -1677,18 +1711,35 @@ export default function Page() {
   );
 
   const teamRequirementMap = useMemo(() => new Map(teams.map((team) => [team.id, team])), [teams]);
-  const assignedDaysByTeam = useMemo(() => {
-    const map = new Map<string, Set<Day>>();
+  const teamSeatsByDay = useMemo(() => {
+    const map = new Map<string, Record<Day, number>>();
     for (const item of manualAllocations) {
       if (item.kind !== "team" || !item.teamId) {
         continue;
       }
-      const days = map.get(item.teamId) ?? new Set<Day>();
-      days.add(item.day);
-      map.set(item.teamId, days);
+      const row = map.get(item.teamId) ?? { Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0 };
+      row[item.day] += item.seats;
+      map.set(item.teamId, row);
     }
     return map;
   }, [manualAllocations]);
+  const assignedDaysByTeam = useMemo(() => {
+    const map = new Map<string, Set<Day>>();
+    for (const team of teams) {
+      const requiredSeats = requiredSeatsByTeam.get(team.id) ?? team.size;
+      const seatsByDay = teamSeatsByDay.get(team.id);
+      const days = new Set<Day>();
+      if (seatsByDay) {
+        for (const day of DAYS) {
+          if ((seatsByDay[day] ?? 0) >= requiredSeats) {
+            days.add(day);
+          }
+        }
+      }
+      map.set(team.id, days);
+    }
+    return map;
+  }, [requiredSeatsByTeam, teamSeatsByDay, teams]);
   const proximityRequestStatuses = useMemo(() => {
     const defaultStatus: ProximityRequestStatus = { status: "na", unmetDays: [] };
     if (!result) {
@@ -1991,13 +2042,15 @@ export default function Page() {
 
     const policyFlexInvalid = Number(flexDefault) < 0 || Number(flexDefault) > 100;
     const policyBenchStabilityInvalid = Number(benchStabilityWeight) < 0 || Number(benchStabilityWeight) > 10;
-    const policyMonFriPenaltyInvalid = Number(monFriPairPenaltyWeight) < 0 || Number(monFriPairPenaltyWeight) > 100;
-    if (policyFlexInvalid || policyBenchStabilityInvalid || policyMonFriPenaltyInvalid) {
+    const policyMonFriPenaltyInvalid = Number(monFriPairPenaltyWeight) < 0 || Number(monFriPairPenaltyWeight) > 300;
+    const policySeatShortfallInvalid =
+      Number(allowedSeatShortfallPerTeamDay) < 0 || Number(allowedSeatShortfallPerTeamDay) > 10;
+    if (policyFlexInvalid || policyBenchStabilityInvalid || policyMonFriPenaltyInvalid || policySeatShortfallInvalid) {
       issues.push({
         id: "policy-invalid",
         scope: "step0",
         level: "error",
-        message: "Policy has out-of-range values (flex 0-100, stability 0-10, Mon+Fri penalty 0-100).",
+        message: "Policy has out-of-range values (flex 0-100, stability 0-10, Mon+Fri penalty 0-300, seat shortfall 0-10).",
         fixCode: "normalize_policy",
         fixLabel: "Normalize policy",
       });
@@ -2043,6 +2096,7 @@ export default function Page() {
     floors,
     manualUsageWarnings,
     monFriPairPenaltyWeight,
+    allowedSeatShortfallPerTeamDay,
     preallocations,
     proximityRequestStatuses,
     proximityRequests,
@@ -2448,7 +2502,8 @@ export default function Page() {
     if (fixCode === "normalize_policy") {
       setFlexDefault((prev) => clamp(Number(prev) || 0, 0, 100));
       setBenchStabilityWeight((prev) => clamp(Number(prev) || 0, 0, 10));
-      setMonFriPairPenaltyWeight((prev) => clamp(Number(prev) || 0, 0, 100));
+      setMonFriPairPenaltyWeight((prev) => clamp(Number(prev) || 0, 0, 300));
+      setAllowedSeatShortfallPerTeamDay((prev) => normalizeAllowedSeatShortfall(prev));
       return;
     }
 
@@ -3005,7 +3060,10 @@ export default function Page() {
           flexDefault: clamp(Number(settings.flexDefault ?? 10), 0, 100),
           flexOverrides: nextFlexOverrides,
           benchStabilityWeight: clamp(Number(settings.benchStabilityWeight ?? 6), 0, 10),
-          monFriPairPenaltyWeight: clamp(Number(settings.monFriPairPenaltyWeight ?? 45), 0, 100),
+          monFriPairPenaltyWeight: clamp(Number(settings.monFriPairPenaltyWeight ?? 120), 0, 300),
+          allowedSeatShortfallPerTeamDay: normalizeAllowedSeatShortfall(
+            Number(settings.allowedSeatShortfallPerTeamDay ?? 0),
+          ),
           proximityRequests: normalizeConfigProximity(
             settings.proximityRequests,
             teamFloorById,
@@ -3036,6 +3094,7 @@ export default function Page() {
         flexOverrides: { ...flexOverrides },
         benchStabilityWeight: Number(benchStabilityWeight),
         monFriPairPenaltyWeight: Number(monFriPairPenaltyWeight),
+        allowedSeatShortfallPerTeamDay: normalizeAllowedSeatShortfall(allowedSeatShortfallPerTeamDay),
         proximityRequests: cloneProximity(proximityRequests),
       },
     };
@@ -3422,7 +3481,8 @@ export default function Page() {
           days: toDayArray(item.days && item.days.length > 0 ? item.days : DAYS),
         })),
       benchStabilityWeight: Math.max(0, Math.min(10, Number(benchStabilityWeight) || 0)),
-      monFriPairPenaltyWeight: Math.max(0, Math.min(100, Number(monFriPairPenaltyWeight) || 0)),
+      monFriPairPenaltyWeight: Math.max(0, Math.min(300, Number(monFriPairPenaltyWeight) || 0)),
+      allowedSeatShortfallPerTeamDay: normalizeAllowedSeatShortfall(Number(allowedSeatShortfallPerTeamDay) || 0),
     };
   }
 
@@ -3749,8 +3809,8 @@ export default function Page() {
         <p className="kicker">Office Allocation Planner</p>
         <h1>Build weekly bench-by-day plans with fairness-first scheduling</h1>
         <p>
-          Configure benches, teams, pre-allocations, and flex targets. The planner enforces capacity and full-team attendance
-          days, then compares fairness-first vs efficiency-first outcomes.
+          Configure benches, teams, pre-allocations, and flex targets. The planner enforces capacity and required-seat
+          attendance days, then compares fairness-first vs efficiency-first outcomes.
         </p>
       </section>
 
@@ -4084,13 +4144,23 @@ export default function Page() {
             />
           </label>
           <label>
-            Mon+Fri pair penalty (0-100)
+            Mon+Fri pair penalty (0-300)
             <input
               type="number"
               min={0}
-              max={100}
+              max={300}
               value={monFriPairPenaltyWeight}
               onChange={(e) => setMonFriPairPenaltyWeight(Number(e.target.value))}
+            />
+          </label>
+          <label>
+            Allowed missing seats per team-day (0-10)
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={allowedSeatShortfallPerTeamDay}
+              onChange={(e) => setAllowedSeatShortfallPerTeamDay(normalizeAllowedSeatShortfall(Number(e.target.value)))}
             />
           </label>
           <p className={paletteAudit.ok ? "metric-row" : "warning"}>
@@ -4970,7 +5040,10 @@ export default function Page() {
             </p>
             <p className="metric-row fixed-status">FIXED chips are pre-allocated seats and cannot be moved.</p>
             <p className="metric-row">Bench stability preference weight: {benchStabilityWeight}/10.</p>
-            <p className="metric-row">Mon+Fri pair penalty weight: {monFriPairPenaltyWeight}/100.</p>
+            <p className="metric-row">Mon+Fri pair penalty weight: {monFriPairPenaltyWeight}/300.</p>
+            <p className="metric-row">
+              Allowed missing seats for presence: {normalizeAllowedSeatShortfall(allowedSeatShortfallPerTeamDay)} per team-day.
+            </p>
             <p className="metric-row">
               Teams assigned on both Mon and Fri: {result.primary.diagnostics.monFriPairAssignedTeams}
             </p>
@@ -5168,7 +5241,7 @@ export default function Page() {
           >
             <div>
               <h3>Team Outcomes</h3>
-              <p className="subtle">Fulfillment, unmet demand, and Monday/Friday rule.</p>
+              <p className="subtle">Fulfillment, seat shortfall tolerance, and Monday/Friday rule.</p>
               <p className="subtle">Scope: {resultScopeLabel}</p>
               <p className="subtle">
                 Day colors: <span className="team-day-chip team-day-match">requested + assigned</span>{" "}
@@ -5181,7 +5254,8 @@ export default function Page() {
                   <tr>
                     <th>Team</th>
                     <th>Target</th>
-                    <th>Assigned</th>
+                    <th>Scheduled</th>
+                    <th>Qualified</th>
                     <th>Unmet</th>
                     <th>Ratio</th>
                     <th>Pref hits</th>
@@ -5189,6 +5263,8 @@ export default function Page() {
                     <th>Contiguous met</th>
                     <th>Mon/Fri</th>
                     <th>Mon+Fri pair</th>
+                    <th>Req seats/day</th>
+                    <th>Seat shortfall</th>
                     <th>Days (Req vs Assigned)</th>
                   </tr>
                 </thead>
@@ -5200,6 +5276,7 @@ export default function Page() {
                     <tr key={row.teamId}>
                       <td>{row.teamId}</td>
                       <td>{row.targetDays}</td>
+                      <td>{row.scheduledDays}</td>
                       <td>{row.assignedDays}</td>
                       <td>{row.unmetDays}</td>
                       <td>{row.fulfillmentRatio.toFixed(2)}</td>
@@ -5208,6 +5285,8 @@ export default function Page() {
                       <td>{teamContiguousStatus.get(row.teamId) ? "Yes" : "No"}</td>
                       <td>{row.monFriSatisfied ? "Yes" : "No"}</td>
                       <td>{row.monFriPairAssigned ? "Yes" : "No"}</td>
+                      <td>{row.requiredSeatsPerDay}</td>
+                      <td>{row.seatShortfallTotal}</td>
                       <td>
                         <div className="team-day-row">
                           {DAYS.map((day) => {
@@ -5233,7 +5312,7 @@ export default function Page() {
                   })}
                   {primaryTeamDiagnosticsInResultScope.length === 0 ? (
                     <tr>
-                      <td colSpan={11}>
+                      <td colSpan={14}>
                         <span className="subtle">No teams in this scope.</span>
                       </td>
                     </tr>

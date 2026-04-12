@@ -59,6 +59,7 @@ export type PlannerInput = {
   proximityRequests?: TeamProximityRequest[];
   benchStabilityWeight?: number;
   monFriPairPenaltyWeight?: number;
+  allowedSeatShortfallPerTeamDay?: number;
 };
 
 export type TeamSchedule = {
@@ -82,12 +83,15 @@ export type FlexAllocation = {
 export type TeamDiagnostics = {
   teamId: string;
   targetDays: number;
+  scheduledDays: number;
   assignedDays: number;
   unmetDays: number;
   fulfillmentRatio: number;
   preferredHits: number;
   monFriSatisfied: boolean;
   monFriPairAssigned: boolean;
+  requiredSeatsPerDay: number;
+  seatShortfallTotal: number;
 };
 
 export type DayDiagnostics = {

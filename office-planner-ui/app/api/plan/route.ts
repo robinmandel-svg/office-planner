@@ -127,9 +127,16 @@ function validateInput(raw: PlannerInput): string[] {
 
   if (
     raw.monFriPairPenaltyWeight !== undefined &&
-    (raw.monFriPairPenaltyWeight < 0 || raw.monFriPairPenaltyWeight > 100)
+    (raw.monFriPairPenaltyWeight < 0 || raw.monFriPairPenaltyWeight > 300)
   ) {
-    errors.push("monFriPairPenaltyWeight must be between 0 and 100.");
+    errors.push("monFriPairPenaltyWeight must be between 0 and 300.");
+  }
+
+  if (
+    raw.allowedSeatShortfallPerTeamDay !== undefined &&
+    (raw.allowedSeatShortfallPerTeamDay < 0 || raw.allowedSeatShortfallPerTeamDay > 10)
+  ) {
+    errors.push("allowedSeatShortfallPerTeamDay must be between 0 and 10.");
   }
 
   if (raw.proximityRequests) {

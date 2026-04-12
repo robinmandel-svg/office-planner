@@ -37,6 +37,8 @@ type DayAssignmentResult = {
 
 const MON: Day = "Mon";
 const FRI: Day = "Fri";
+const MAX_MON_FRI_PAIR_PENALTY = 300;
+const MAX_ALLOWED_SEAT_SHORTFALL = 10;
 
 function emptyDayMap(value = 0): DayMap<number> {
   return { Mon: value, Tue: value, Wed: value, Thu: value, Fri: value };
@@ -73,8 +75,27 @@ function hasMonFriPair(days: Iterable<Day>): boolean {
 }
 
 function monFriPairPenaltyWeight(input: PlannerInput, mode: SolverMode): number {
-  const modeDefault = mode === "fairness_first" ? 45 : 30;
-  return clamp(Number(input.monFriPairPenaltyWeight ?? modeDefault), 0, 100);
+  const modeDefault = mode === "fairness_first" ? 120 : 80;
+  return clamp(Number(input.monFriPairPenaltyWeight ?? modeDefault), 0, MAX_MON_FRI_PAIR_PENALTY);
+}
+
+function allowedSeatShortfallPerTeamDay(input: PlannerInput): number {
+  return clamp(Math.round(Number(input.allowedSeatShortfallPerTeamDay ?? 0)), 0, MAX_ALLOWED_SEAT_SHORTFALL);
+}
+
+function requiredSeatsForTeamDay(team: Team, input: PlannerInput): number {
+  const shortfall = allowedSeatShortfallPerTeamDay(input);
+  const minPresence = team.size > 0 ? 1 : 0;
+  const baselineRequired = clamp(team.size - shortfall, minPresence, team.size);
+  return Math.max(baselineRequired, teamAnchorSeats(team));
+}
+
+function requiredSeatsMap(teams: Team[], input: PlannerInput): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const team of teams) {
+    map[team.id] = requiredSeatsForTeamDay(team, input);
+  }
+  return map;
 }
 
 function teamAnchorBenchId(team: Team): string | null {
@@ -275,14 +296,15 @@ function cloneAssignments(assignments: AssignmentMap): AssignmentMap {
 }
 
 function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode: SolverMode): AssignmentMap | null {
+  const requiredByTeam = requiredSeatsMap(input.teams, input);
   const teams = [...input.teams].sort((a, b) => {
     const anchorLoadA = teamAnchorSeats(a) * a.targetDays;
     const anchorLoadB = teamAnchorSeats(b) * b.targetDays;
     if (anchorLoadA !== anchorLoadB) {
       return anchorLoadB - anchorLoadA;
     }
-    const scoreA = a.size * a.targetDays;
-    const scoreB = b.size * b.targetDays;
+    const scoreA = (requiredByTeam[a.id] ?? a.size) * a.targetDays;
+    const scoreB = (requiredByTeam[b.id] ?? b.size) * b.targetDays;
     return scoreB - scoreA;
   });
 
@@ -313,6 +335,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
   for (const team of teams) {
     const anchorBenchId = teamAnchorBenchId(team);
     const anchorSeats = teamAnchorSeats(team);
+    const requiredSeats = requiredByTeam[team.id] ?? team.size;
     const options = generateDayCombosExact(team);
     if (options.length === 0) {
       return null;
@@ -324,7 +347,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
       for (const option of options) {
         let feasible = true;
         for (const day of option) {
-          if (state.remaining[day] < team.size) {
+          if (state.remaining[day] < requiredSeats) {
             feasible = false;
             break;
           }
@@ -343,7 +366,7 @@ function tryExactAssignment(input: PlannerInput, capacity: CapacityContext, mode
 
         const remaining: DayMap<number> = { ...state.remaining };
         for (const day of option) {
-          remaining[day] -= team.size;
+          remaining[day] -= requiredSeats;
         }
 
         const anchorRemaining =
@@ -392,6 +415,7 @@ function chooseDayForTeam(
   dayCap: DayMap<number>,
   mode: SolverMode,
   monFriPairPenalty: number,
+  requiredSeats: number,
 ): Day | null {
   const anchorBenchId = teamAnchorBenchId(team);
   const anchorSeats = teamAnchorSeats(team);
@@ -402,7 +426,7 @@ function chooseDayForTeam(
     if (assigned.has(day)) {
       continue;
     }
-    if (remaining[day] < team.size) {
+    if (remaining[day] < requiredSeats) {
       continue;
     }
     if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
@@ -451,10 +475,12 @@ function enforceMonFri(
   assignments: AssignmentMap,
   remaining: DayMap<number>,
   anchorRemaining: BenchAvailabilityByDay,
+  requiredByTeam: Record<string, number>,
 ): void {
   for (const team of teams) {
     const anchorBenchId = teamAnchorBenchId(team);
     const anchorSeats = teamAnchorSeats(team);
+    const requiredSeats = requiredByTeam[team.id] ?? team.size;
     const assigned = assignments[team.id];
     if (!assigned || [...assigned].some(dayIsMonFri)) {
       continue;
@@ -467,7 +493,7 @@ function enforceMonFri(
         continue;
       }
 
-      if (remaining[day] >= team.size && assigned.size < team.targetDays) {
+      if (remaining[day] >= requiredSeats && assigned.size < team.targetDays) {
         if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
           continue;
         }
@@ -475,7 +501,7 @@ function enforceMonFri(
         candidateDays.add(day);
         if (contiguousCompatible(team, candidateDays)) {
           assigned.add(day);
-          remaining[day] -= team.size;
+          remaining[day] -= requiredSeats;
           if (anchorBenchId && anchorSeats > 0) {
             anchorRemaining[day][anchorBenchId] -= anchorSeats;
           }
@@ -483,7 +509,7 @@ function enforceMonFri(
         }
       }
 
-      if (remaining[day] >= team.size) {
+      if (remaining[day] >= requiredSeats) {
         if (anchorBenchId && anchorSeats > 0 && (anchorRemaining[day][anchorBenchId] ?? 0) < anchorSeats) {
           continue;
         }
@@ -496,9 +522,9 @@ function enforceMonFri(
         candidateDays.add(day);
         if (contiguousCompatible(team, candidateDays)) {
           assigned.delete(dropDay);
-          remaining[dropDay] += team.size;
+          remaining[dropDay] += requiredSeats;
           assigned.add(day);
-          remaining[day] -= team.size;
+          remaining[day] -= requiredSeats;
           if (anchorBenchId && anchorSeats > 0) {
             anchorRemaining[dropDay][anchorBenchId] += anchorSeats;
             anchorRemaining[day][anchorBenchId] -= anchorSeats;
@@ -511,6 +537,7 @@ function enforceMonFri(
 }
 
 function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode: SolverMode): AssignmentMap {
+  const requiredByTeam = requiredSeatsMap(input.teams, input);
   const assignments = initAssignments(input.teams);
   const remaining: DayMap<number> = { ...capacity.dayCapacity };
   const anchorRemaining = cloneBenchAvailability(capacity.benchAvailability);
@@ -532,7 +559,7 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
           return aRatio - bRatio;
         }
         if (mode === "efficiency_first" && a.size !== b.size) {
-          return a.size - b.size;
+          return (requiredByTeam[a.id] ?? a.size) - (requiredByTeam[b.id] ?? b.size);
         }
         return b.targetDays - a.targetDays;
       });
@@ -542,6 +569,7 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
       if (assigned.size >= team.targetDays) {
         continue;
       }
+      const requiredSeats = requiredByTeam[team.id] ?? team.size;
       const chosenDay = chooseDayForTeam(
         team,
         assigned,
@@ -550,12 +578,13 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
         capacity.dayCapacity,
         mode,
         monFriPenalty,
+        requiredSeats,
       );
       if (!chosenDay) {
         continue;
       }
       assigned.add(chosenDay);
-      remaining[chosenDay] -= team.size;
+      remaining[chosenDay] -= requiredSeats;
       const anchorBenchId = teamAnchorBenchId(team);
       const anchorSeats = teamAnchorSeats(team);
       if (anchorBenchId && anchorSeats > 0) {
@@ -564,7 +593,7 @@ function relaxedAssignment(input: PlannerInput, capacity: CapacityContext, mode:
     }
   }
 
-  enforceMonFri(input.teams, assignments, remaining, anchorRemaining);
+  enforceMonFri(input.teams, assignments, remaining, anchorRemaining, requiredByTeam);
   return assignments;
 }
 
@@ -802,7 +831,15 @@ function allocateBenches(
   let contiguityPenalty = 0;
   const strictProximityRelaxations: string[] = [];
   const byDay = teamsByDay(teams, assignments);
+  const requiredByTeam = requiredSeatsMap(teams, input);
   const benchStabilityWeight = Math.max(0, Math.min(10, input.benchStabilityWeight ?? 5));
+  const teamAllocatedByDay: Record<Day, Record<string, number>> = {
+    Mon: {},
+    Tue: {},
+    Wed: {},
+    Thu: {},
+    Fri: {},
+  };
   const teamBenchCenters: Record<string, BenchPoint> = {};
   const benchById = new Map(capacity.benchesByOrder.map((bench) => [bench.id, bench]));
   const benchPointById: Record<string, BenchPoint> = {};
@@ -815,6 +852,7 @@ function allocateBenches(
     if (seats <= 0) {
       return;
     }
+    teamAllocatedByDay[day][teamId] = (teamAllocatedByDay[day][teamId] ?? 0) + seats;
     const existing = allocations.find((item) => item.day === day && item.teamId === teamId && item.benchId === benchId);
     if (existing) {
       existing.seats += seats;
@@ -851,14 +889,14 @@ function allocateBenches(
     const groupedTeamIds = new Set(strictGroups.reduce((acc, group) => [...acc, ...group], [] as string[]));
     const units: Array<{ teamIds: string[]; strict: boolean; totalSize: number }> = [];
     for (const group of strictGroups) {
-      const totalSize = group.reduce((acc, teamId) => acc + (teamById.get(teamId)?.size ?? 0), 0);
+      const totalSize = group.reduce((acc, teamId) => acc + (requiredByTeam[teamId] ?? teamById.get(teamId)?.size ?? 0), 0);
       units.push({ teamIds: group, strict: true, totalSize });
     }
     for (const team of teamList) {
       if (groupedTeamIds.has(team.id)) {
         continue;
       }
-      units.push({ teamIds: [team.id], strict: false, totalSize: team.size });
+      units.push({ teamIds: [team.id], strict: false, totalSize: requiredByTeam[team.id] ?? team.size });
     }
     units.sort((a, b) => b.totalSize - a.totalSize);
 
@@ -868,6 +906,7 @@ function allocateBenches(
       const benchSnapshot = forceSinglePlacement ? { ...benchRemaining } : null;
       const dayCentersSnapshot = forceSinglePlacement ? { ...dayCenters } : null;
       const teamBenchCentersSnapshot = forceSinglePlacement ? { ...teamBenchCenters } : null;
+      const teamAllocatedDaySnapshot = forceSinglePlacement ? { ...teamAllocatedByDay[day] } : null;
 
       function rollbackAndFail(): boolean {
         if (!forceSinglePlacement || !benchSnapshot || !dayCentersSnapshot || !teamBenchCentersSnapshot) {
@@ -886,6 +925,7 @@ function allocateBenches(
           delete teamBenchCenters[key];
         }
         Object.assign(teamBenchCenters, teamBenchCentersSnapshot);
+        teamAllocatedByDay[day] = { ...(teamAllocatedDaySnapshot ?? {}) };
         return false;
       }
 
@@ -895,12 +935,13 @@ function allocateBenches(
         teamSeatByBench[team.id] = {};
         const anchorBenchId = teamAnchorBenchId(team);
         const anchorSeats = teamAnchorSeats(team);
+        const requiredSeats = requiredByTeam[team.id] ?? team.size;
         const reservedAnchorSeats = anchorBenchId ? anchorReservedByTeam[team.id]?.seats ?? 0 : 0;
         if (anchorBenchId && anchorSeats > 0 && reservedAnchorSeats < anchorSeats) {
           return rollbackAndFail();
         }
 
-        let left = team.size;
+        let left = requiredSeats;
         if (anchorBenchId && reservedAnchorSeats > 0) {
           addTeamAllocation(day, team.id, anchorBenchId, reservedAnchorSeats);
           teamSeatByBench[team.id][anchorBenchId] = reservedAnchorSeats;
@@ -1100,6 +1141,53 @@ function allocateBenches(
       }
     }
 
+    // Use leftover seats to reduce partial attendance before assigning flex seats.
+    for (const team of teamList) {
+      const allocatedSeats = teamAllocatedByDay[day][team.id] ?? 0;
+      let extraLeft = Math.max(0, team.size - allocatedSeats);
+      if (extraLeft <= 0) {
+        continue;
+      }
+      const anchorBenchId = teamAnchorBenchId(team);
+      if (anchorBenchId && (benchRemaining[anchorBenchId] ?? 0) > 0) {
+        const anchorExtra = Math.min(benchRemaining[anchorBenchId], extraLeft);
+        if (anchorExtra > 0) {
+          benchRemaining[anchorBenchId] -= anchorExtra;
+          extraLeft -= anchorExtra;
+          addTeamAllocation(day, team.id, anchorBenchId, anchorExtra);
+        }
+      }
+      if (extraLeft <= 0) {
+        continue;
+      }
+      const preferredCenter =
+        dayCenters[team.id] ??
+        teamBenchCenters[team.id] ??
+        (anchorBenchId ? benchPointById[anchorBenchId] : undefined) ??
+        null;
+      const candidateBenches = [...capacity.benchesByOrder]
+        .filter((bench) => (benchRemaining[bench.id] ?? 0) > 0)
+        .sort((a, b) => {
+          if (!preferredCenter) {
+            return a.order - b.order;
+          }
+          return benchDistance(benchPointById[a.id], preferredCenter) - benchDistance(benchPointById[b.id], preferredCenter);
+        });
+      for (const bench of candidateBenches) {
+        if (extraLeft <= 0) {
+          break;
+        }
+        const available = benchRemaining[bench.id] ?? 0;
+        if (available <= 0) {
+          continue;
+        }
+        const seats = Math.min(available, extraLeft);
+        benchRemaining[bench.id] -= seats;
+        extraLeft -= seats;
+        addTeamAllocation(day, team.id, bench.id, seats);
+      }
+    }
+
     let flexLeft = capacity.dayFlex[day];
     for (let idx = capacity.benchesByOrder.length - 1; idx >= 0 && flexLeft > 0; idx -= 1) {
       const bench = capacity.benchesByOrder[idx];
@@ -1117,22 +1205,53 @@ function allocateBenches(
   return { allocations, flexAllocations, contiguityPenalty, strictProximityRelaxations };
 }
 
-function buildTeamDiagnostics(teams: Team[], assignments: AssignmentMap): TeamDiagnostics[] {
+function teamSeatByDayMap(allocations: BenchAllocation[]): Record<string, DayMap<number>> {
+  const map: Record<string, DayMap<number>> = {};
+  for (const allocation of allocations) {
+    if (!map[allocation.teamId]) {
+      map[allocation.teamId] = emptyDayMap(0);
+    }
+    map[allocation.teamId][allocation.day] += allocation.seats;
+  }
+  return map;
+}
+
+function buildTeamDiagnostics(
+  teams: Team[],
+  assignments: AssignmentMap,
+  allocations: BenchAllocation[],
+  input: PlannerInput,
+): TeamDiagnostics[] {
+  const teamSeatsByDay = teamSeatByDayMap(allocations);
   return teams.map((team) => {
     const days = assignments[team.id] ?? new Set<Day>();
-    const assignedDays = days.size;
+    const scheduledDays = days.size;
+    const requiredSeatsPerDay = requiredSeatsForTeamDay(team, input);
+    const qualifiedDays: Day[] = [];
+    let seatShortfallTotal = 0;
+    for (const day of days) {
+      const allocatedSeats = teamSeatsByDay[team.id]?.[day] ?? 0;
+      if (allocatedSeats >= requiredSeatsPerDay) {
+        qualifiedDays.push(day);
+      }
+      seatShortfallTotal += Math.max(0, team.size - allocatedSeats);
+    }
+    const assignedDays = qualifiedDays.length;
     const unmetDays = Math.max(0, team.targetDays - assignedDays);
     const fulfillmentRatio = team.targetDays > 0 ? assignedDays / team.targetDays : 1;
-    const monFriPairAssigned = hasMonFriPair(days);
+    const monFriPairAssigned = hasMonFriPair(qualifiedDays);
     return {
       teamId: team.id,
       targetDays: team.targetDays,
+      scheduledDays,
       assignedDays,
       unmetDays,
       fulfillmentRatio,
-      preferredHits: preferredHits(days, team),
-      monFriSatisfied: [...days].some(dayIsMonFri),
+      preferredHits: preferredHits(qualifiedDays, team),
+      monFriSatisfied: qualifiedDays.some(dayIsMonFri),
       monFriPairAssigned,
+      requiredSeatsPerDay,
+      seatShortfallTotal,
     };
   });
 }
@@ -1164,9 +1283,20 @@ function buildDayDiagnostics(
   });
 }
 
-function toTeamSchedules(assignments: AssignmentMap): TeamSchedule[] {
+function toTeamSchedules(
+  teams: Team[],
+  assignments: AssignmentMap,
+  allocations: BenchAllocation[],
+  input: PlannerInput,
+): TeamSchedule[] {
+  const teamById = new Map(teams.map((team) => [team.id, team]));
+  const teamSeatsByDay = teamSeatByDayMap(allocations);
   return Object.entries(assignments).map(([teamId, daySet]) => {
-    const days = [...daySet].sort((a, b) => DAYS.indexOf(a) - DAYS.indexOf(b));
+    const team = teamById.get(teamId);
+    const requiredSeats = team ? requiredSeatsForTeamDay(team, input) : 1;
+    const days = [...daySet]
+      .filter((day) => (teamSeatsByDay[teamId]?.[day] ?? 0) >= requiredSeats)
+      .sort((a, b) => DAYS.indexOf(a) - DAYS.indexOf(b));
     return { teamId, days };
   });
 }
@@ -1181,7 +1311,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
     capacity,
   );
 
-  const teamDiagnostics = buildTeamDiagnostics(input.teams, assignmentResult.assignments);
+  const teamDiagnostics = buildTeamDiagnostics(input.teams, assignmentResult.assignments, allocations, input);
   const dayDiagnostics = buildDayDiagnostics(allocations, flexAllocations, capacity);
   const fairnessMinRatio = teamDiagnostics.reduce((min, row) => Math.min(min, row.fulfillmentRatio), 1);
   const totalFulfilledDays = teamDiagnostics.reduce((acc, row) => acc + row.assignedDays, 0);
@@ -1190,7 +1320,7 @@ function makePlan(input: PlannerInput, mode: SolverMode): PlanResult {
   return {
     allocations,
     flexAllocations,
-    teamSchedules: toTeamSchedules(assignmentResult.assignments),
+    teamSchedules: toTeamSchedules(input.teams, assignmentResult.assignments, allocations, input),
     diagnostics: {
       mode,
       exactFeasible: assignmentResult.exactFeasible,
@@ -1335,6 +1465,7 @@ export function plan(input: PlannerInput): PlannerResponse {
       proximityRequests: floorProximity,
       benchStabilityWeight: input.benchStabilityWeight,
       monFriPairPenaltyWeight: input.monFriPairPenaltyWeight,
+      allowedSeatShortfallPerTeamDay: input.allowedSeatShortfallPerTeamDay,
     };
   });
 
