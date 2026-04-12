@@ -1142,49 +1142,84 @@ function allocateBenches(
     }
 
     // Use leftover seats to reduce partial attendance before assigning flex seats.
+    // Distribute extras fairly (round-robin by highest shortfall ratio) so multiple teams benefit.
+    const extraNeedByTeam: Record<string, number> = {};
     for (const team of teamList) {
       const allocatedSeats = teamAllocatedByDay[day][team.id] ?? 0;
-      let extraLeft = Math.max(0, team.size - allocatedSeats);
-      if (extraLeft <= 0) {
-        continue;
-      }
+      extraNeedByTeam[team.id] = Math.max(0, team.size - allocatedSeats);
+    }
+
+    function totalExtraNeed(): number {
+      return teamList.reduce((acc, team) => acc + (extraNeedByTeam[team.id] ?? 0), 0);
+    }
+
+    function bestBenchForTeamExtra(team: Team): string | null {
       const anchorBenchId = teamAnchorBenchId(team);
       if (anchorBenchId && (benchRemaining[anchorBenchId] ?? 0) > 0) {
-        const anchorExtra = Math.min(benchRemaining[anchorBenchId], extraLeft);
-        if (anchorExtra > 0) {
-          benchRemaining[anchorBenchId] -= anchorExtra;
-          extraLeft -= anchorExtra;
-          addTeamAllocation(day, team.id, anchorBenchId, anchorExtra);
-        }
-      }
-      if (extraLeft <= 0) {
-        continue;
+        return anchorBenchId;
       }
       const preferredCenter =
         dayCenters[team.id] ??
         teamBenchCenters[team.id] ??
         (anchorBenchId ? benchPointById[anchorBenchId] : undefined) ??
         null;
-      const candidateBenches = [...capacity.benchesByOrder]
-        .filter((bench) => (benchRemaining[bench.id] ?? 0) > 0)
-        .sort((a, b) => {
-          if (!preferredCenter) {
-            return a.order - b.order;
-          }
-          return benchDistance(benchPointById[a.id], preferredCenter) - benchDistance(benchPointById[b.id], preferredCenter);
-        });
-      for (const bench of candidateBenches) {
-        if (extraLeft <= 0) {
-          break;
-        }
+      let bestBenchId: string | null = null;
+      let bestScore = Number.POSITIVE_INFINITY;
+      for (const bench of capacity.benchesByOrder) {
         const available = benchRemaining[bench.id] ?? 0;
         if (available <= 0) {
           continue;
         }
-        const seats = Math.min(available, extraLeft);
-        benchRemaining[bench.id] -= seats;
-        extraLeft -= seats;
-        addTeamAllocation(day, team.id, bench.id, seats);
+        const point = benchPointById[bench.id];
+        const distancePenalty = preferredCenter ? benchDistance(point, preferredCenter) : 0;
+        const score = distancePenalty + bench.order * 0.0001;
+        if (score < bestScore) {
+          bestScore = score;
+          bestBenchId = bench.id;
+        }
+      }
+      return bestBenchId;
+    }
+
+    while (totalExtraNeed() > 0) {
+      const teamsWithNeed = teamList
+        .filter((team) => (extraNeedByTeam[team.id] ?? 0) > 0)
+        .sort((a, b) => {
+          const shortfallRatioA = (extraNeedByTeam[a.id] ?? 0) / Math.max(1, a.size);
+          const shortfallRatioB = (extraNeedByTeam[b.id] ?? 0) / Math.max(1, b.size);
+          if (shortfallRatioA !== shortfallRatioB) {
+            return shortfallRatioB - shortfallRatioA;
+          }
+          return (extraNeedByTeam[b.id] ?? 0) - (extraNeedByTeam[a.id] ?? 0);
+        });
+      if (teamsWithNeed.length === 0) {
+        break;
+      }
+      let progressed = false;
+      for (const team of teamsWithNeed) {
+        const needed = extraNeedByTeam[team.id] ?? 0;
+        if (needed <= 0) {
+          continue;
+        }
+        const benchId = bestBenchForTeamExtra(team);
+        if (!benchId) {
+          continue;
+        }
+        const available = benchRemaining[benchId] ?? 0;
+        if (available <= 0) {
+          continue;
+        }
+        const seats = Math.min(1, needed, available);
+        if (seats <= 0) {
+          continue;
+        }
+        benchRemaining[benchId] -= seats;
+        extraNeedByTeam[team.id] -= seats;
+        addTeamAllocation(day, team.id, benchId, seats);
+        progressed = true;
+      }
+      if (!progressed) {
+        break;
       }
     }
 
